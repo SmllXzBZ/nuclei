@@ -35,7 +35,7 @@ const (
 )
 
 var (
-	TrustedTemplateDomains = []string{"templates.nuclei.sh", "cloud.projectdiscovery.io"}
+	TrustedTemplateDomains = []string{"cloud.projectdiscovery.io"}
 )
 
 // Config contains the configuration options for the loader
@@ -197,7 +197,7 @@ func handleTemplatesEditorURLs(input string) string {
 	if err != nil {
 		return input
 	}
-	if !strings.HasSuffix(parsed.Hostname(), "templates.nuclei.sh") {
+	if !strings.HasSuffix(parsed.Hostname(), "cloud.projectdiscovery.io") {
 		return input
 	}
 	if strings.HasSuffix(parsed.Path, ".yaml") {
@@ -402,6 +402,12 @@ func (store *Store) LoadTemplatesWithTags(templatesList, tags []string) []*templ
 					stats.Increment(parsers.HeadlessFlagWarningStats)
 					if config.DefaultConfig.LogAllEvents {
 						gologger.Print().Msgf("[%v] Headless flag is required for headless template '%s'.\n", aurora.Yellow("WRN").String(), templatePath)
+					}
+				} else if len(parsed.RequestsCode) > 0 && !store.config.ExecutorOptions.Options.EnableCodeTemplates {
+					// donot include 'Code' protocol custom template in final list if code flag is not set
+					stats.Increment(parsers.CodeFlagWarningStats)
+					if config.DefaultConfig.LogAllEvents {
+						gologger.Print().Msgf("[%v] Code flag is required for code protocol template '%s'.\n", aurora.Yellow("WRN").String(), templatePath)
 					}
 				} else if len(parsed.RequestsCode) > 0 && !parsed.Verified && len(parsed.Workflows) == 0 {
 					// donot include unverified 'Code' protocol custom template in final list

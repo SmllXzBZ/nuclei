@@ -2,6 +2,8 @@ package testutils
 
 import (
 	"context"
+	"encoding/base64"
+	"os"
 	"time"
 
 	"github.com/projectdiscovery/ratelimit"
@@ -18,6 +20,7 @@ import (
 	"github.com/projectdiscovery/nuclei/v3/pkg/progress"
 	"github.com/projectdiscovery/nuclei/v3/pkg/protocols"
 	"github.com/projectdiscovery/nuclei/v3/pkg/protocols/common/protocolinit"
+	protocolUtils "github.com/projectdiscovery/nuclei/v3/pkg/protocols/utils"
 	"github.com/projectdiscovery/nuclei/v3/pkg/types"
 	"github.com/projectdiscovery/nuclei/v3/pkg/utils"
 )
@@ -84,7 +87,7 @@ func NewMockExecuterOptions(options *types.Options, info *TemplateInfo) *protoco
 		TemplateID:   info.ID,
 		TemplateInfo: info.Info,
 		TemplatePath: info.Path,
-		Output:       NewMockOutputWriter(),
+		Output:       NewMockOutputWriter(options.OmitTemplate),
 		Options:      options,
 		Progress:     progressImpl,
 		ProjectFile:  nil,
@@ -106,14 +109,15 @@ func (n *NoopWriter) Write(data []byte, level levels.Level) {}
 // MockOutputWriter is a mocked output writer.
 type MockOutputWriter struct {
 	aurora          aurora.Aurora
+	omitTemplate    bool
 	RequestCallback func(templateID, url, requestType string, err error)
 	FailureCallback func(result *output.InternalEvent)
 	WriteCallback   func(o *output.ResultEvent)
 }
 
 // NewMockOutputWriter creates a new mock output writer
-func NewMockOutputWriter() *MockOutputWriter {
-	return &MockOutputWriter{aurora: aurora.NewAurora(false)}
+func NewMockOutputWriter(omomitTemplate bool) *MockOutputWriter {
+	return &MockOutputWriter{aurora: aurora.NewAurora(false), omitTemplate: omomitTemplate}
 }
 
 // Close closes the output writer interface
@@ -163,6 +167,13 @@ func (m *MockOutputWriter) WriteFailure(wrappedEvent *output.InternalWrappedEven
 	if ti, ok := event["template-info"].(model.Info); ok {
 		templateInfo = ti
 	}
+	fields := protocolUtils.GetJsonFieldsFromURL(types.ToString(event["host"]))
+	if types.ToString(event["ip"]) != "" {
+		fields.Ip = types.ToString(event["ip"])
+	}
+	if types.ToString(event["path"]) != "" {
+		fields.Path = types.ToString(event["path"])
+	}
 	data := &output.ResultEvent{
 		Template:      templatePath,
 		TemplateURL:   templateURL,
@@ -170,13 +181,31 @@ func (m *MockOutputWriter) WriteFailure(wrappedEvent *output.InternalWrappedEven
 		TemplatePath:  types.ToString(event["template-path"]),
 		Info:          templateInfo,
 		Type:          types.ToString(event["type"]),
-		Host:          types.ToString(event["host"]),
+		Path:          fields.Path,
+		Host:          fields.Host,
+		Port:          fields.Port,
+		Scheme:        fields.Scheme,
+		URL:           fields.URL,
+		IP:            fields.Ip,
 		Request:       types.ToString(event["request"]),
 		Response:      types.ToString(event["response"]),
 		MatcherStatus: false,
 		Timestamp:     time.Now(),
+		//FIXME: this is workaround to encode the template when no results were found
+		TemplateEncoded: m.encodeTemplate(types.ToString(event["template-path"])),
+		Error:           types.ToString(event["error"]),
 	}
 	return m.Write(data)
+}
+
+var maxTemplateFileSizeForEncoding = 1024 * 1024
+
+func (w *MockOutputWriter) encodeTemplate(templatePath string) string {
+	data, err := os.ReadFile(templatePath)
+	if err == nil && !w.omitTemplate && len(data) <= maxTemplateFileSizeForEncoding && config.DefaultConfig.IsCustomTemplate(templatePath) {
+		return base64.StdEncoding.EncodeToString(data)
+	}
+	return ""
 }
 
 func (m *MockOutputWriter) WriteStoreDebugData(host, templateID, eventType string, data string) {}
