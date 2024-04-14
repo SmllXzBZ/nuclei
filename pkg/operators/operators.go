@@ -64,6 +64,22 @@ func (operators *Operators) Compile() error {
 	return nil
 }
 
+func (operators *Operators) HasDSL() bool {
+	for _, matcher := range operators.Matchers {
+		if len(matcher.DSL) > 0 {
+			return true
+		}
+	}
+
+	for _, extractor := range operators.Extractors {
+		if len(extractor.DSL) > 0 {
+			return true
+		}
+	}
+
+	return false
+}
+
 // GetMatchersCondition returns the condition for the matchers
 func (operators *Operators) GetMatchersCondition() matchers.ConditionType {
 	return operators.matchersCondition
@@ -90,6 +106,8 @@ type Result struct {
 
 	// Optional lineCounts for file protocol
 	LineCount string
+	// Operators is reference to operators that generated this result (Read-Only)
+	Operators *Operators
 }
 
 func (result *Result) HasMatch(name string) bool {
@@ -194,7 +212,11 @@ func (r *Result) Merge(result *Result) {
 		}
 	}
 	for k, v := range result.DynamicValues {
-		r.DynamicValues[k] = v
+		if _, ok := r.DynamicValues[k]; !ok {
+			r.DynamicValues[k] = v
+		} else {
+			r.DynamicValues[k] = sliceutil.Dedupe(append(r.DynamicValues[k], v...))
+		}
 	}
 	for k, v := range result.PayloadValues {
 		r.PayloadValues[k] = v
@@ -217,10 +239,17 @@ func (operators *Operators) Execute(data map[string]interface{}, match MatchFunc
 		Extracts:      make(map[string][]string),
 		DynamicValues: make(map[string][]string),
 		outputUnique:  make(map[string]struct{}),
+		Operators:     operators,
 	}
+
+	// state variable to check if all extractors are internal
+	var allInternalExtractors bool = true
 
 	// Start with the extractors first and evaluate them.
 	for _, extractor := range operators.Extractors {
+		if !extractor.Internal && allInternalExtractors {
+			allInternalExtractors = false
+		}
 		var extractorResults []string
 		for match := range extract(data, extractor) {
 			extractorResults = append(extractorResults, match)
@@ -240,6 +269,10 @@ func (operators *Operators) Execute(data map[string]interface{}, match MatchFunc
 		}
 		if len(extractorResults) > 0 && !extractor.Internal && extractor.Name != "" {
 			result.Extracts[extractor.Name] = extractorResults
+		}
+		// update data with whatever was extracted doesn't matter if it is internal or not (skip unless it empty)
+		if len(extractorResults) > 0 {
+			data[extractor.Name] = getExtractedValue(extractorResults)
 		}
 	}
 
@@ -270,7 +303,7 @@ func (operators *Operators) Execute(data map[string]interface{}, match MatchFunc
 		}
 		if isMatch, matched := match(data, matcher); isMatch {
 			if isDebug { // matchers without an explicit name or with AND condition should only be made visible if debug is enabled
-				matcherName := getMatcherName(matcher, matcherIndex)
+				matcherName := GetMatcherName(matcher, matcherIndex)
 				result.Matches[matcherName] = matched
 			} else { // if it's a "named" matcher with OR condition, then display it
 				if matcherCondition == matchers.ORCondition && matcher.Name != "" {
@@ -282,18 +315,24 @@ func (operators *Operators) Execute(data map[string]interface{}, match MatchFunc
 			if len(result.DynamicValues) > 0 {
 				return result, true
 			}
-			return nil, false
+			return result, false
 		}
 	}
 
 	result.Matched = matches
 	result.Extracted = len(result.OutputExtracts) > 0
-	if len(result.DynamicValues) > 0 {
+	if len(result.DynamicValues) > 0 && allInternalExtractors {
+		// only return early if all extractors are internal
+		// if some are internal and some are not then followthrough
 		return result, true
 	}
 
 	// Don't print if we have matchers, and they have not matched, regardless of extractor
 	if len(operators.Matchers) > 0 && !matches {
+		// if dynamic values are present then it is not a failure
+		if len(result.DynamicValues) > 0 {
+			return result, true
+		}
 		return nil, false
 	}
 	// Write a final string of output if matcher type is
@@ -301,10 +340,15 @@ func (operators *Operators) Execute(data map[string]interface{}, match MatchFunc
 	if len(result.Extracts) > 0 || len(result.OutputExtracts) > 0 || matches {
 		return result, true
 	}
+	// if dynamic values are present then it is not a failure
+	if len(result.DynamicValues) > 0 {
+		return result, true
+	}
 	return nil, false
 }
 
-func getMatcherName(matcher *matchers.Matcher, matcherIndex int) string {
+// GetMatcherName returns matchername of given matcher
+func GetMatcherName(matcher *matchers.Matcher, matcherIndex int) string {
 	if matcher.Name != "" {
 		return matcher.Name
 	} else {
@@ -338,4 +382,31 @@ func (operators *Operators) IsEmpty() bool {
 // Len calculates the sum of the number of matchers and extractors
 func (operators *Operators) Len() int {
 	return len(operators.Matchers) + len(operators.Extractors)
+}
+
+// getExtractedValue takes array of extracted values if it only has one value
+// then it is flattened and returned as a string else original type is returned
+func getExtractedValue(values []string) any {
+	if len(values) == 1 {
+		return values[0]
+	} else {
+		return values
+	}
+}
+
+// EvalBoolSlice evaluates a slice of bools using a logical AND
+func EvalBoolSlice(slice []bool, isAnd bool) bool {
+	if len(slice) == 0 {
+		return false
+	}
+
+	result := slice[0]
+	for _, b := range slice[1:] {
+		if isAnd {
+			result = result && b
+		} else {
+			result = result || b
+		}
+	}
+	return result
 }

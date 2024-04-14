@@ -19,6 +19,7 @@ import (
 	"github.com/projectdiscovery/nuclei/v3/pkg/protocols/common/contextargs"
 	"github.com/projectdiscovery/nuclei/v3/pkg/protocols/common/expressions"
 	"github.com/projectdiscovery/nuclei/v3/pkg/protocols/common/generators"
+	"github.com/projectdiscovery/nuclei/v3/pkg/protocols/common/protocolstate"
 	"github.com/projectdiscovery/nuclei/v3/pkg/protocols/common/utils/vardump"
 	protocolutils "github.com/projectdiscovery/nuclei/v3/pkg/protocols/utils"
 	httputil "github.com/projectdiscovery/nuclei/v3/pkg/protocols/utils/http"
@@ -213,7 +214,7 @@ func geTimeParameter(p *Page, act *Action, parameterName string, defaultValue ti
 }
 
 // ActionAddHeader executes a AddHeader action.
-func (p *Page) ActionAddHeader(act *Action, out map[string]string /*TODO review unused parameter*/) error {
+func (p *Page) ActionAddHeader(act *Action, out map[string]string) error {
 	in := p.getActionArgWithDefaultValues(act, "part")
 
 	args := make(map[string]string)
@@ -224,7 +225,7 @@ func (p *Page) ActionAddHeader(act *Action, out map[string]string /*TODO review 
 }
 
 // ActionSetHeader executes a SetHeader action.
-func (p *Page) ActionSetHeader(act *Action, out map[string]string /*TODO review unused parameter*/) error {
+func (p *Page) ActionSetHeader(act *Action, out map[string]string) error {
 	in := p.getActionArgWithDefaultValues(act, "part")
 
 	args := make(map[string]string)
@@ -235,7 +236,7 @@ func (p *Page) ActionSetHeader(act *Action, out map[string]string /*TODO review 
 }
 
 // ActionDeleteHeader executes a DeleteHeader action.
-func (p *Page) ActionDeleteHeader(act *Action, out map[string]string /*TODO review unused parameter*/) error {
+func (p *Page) ActionDeleteHeader(act *Action, out map[string]string) error {
 	in := p.getActionArgWithDefaultValues(act, "part")
 
 	args := make(map[string]string)
@@ -342,7 +343,7 @@ func (p *Page) RunScript(action *Action, out map[string]string) error {
 }
 
 // ClickElement executes click actions for an element.
-func (p *Page) ClickElement(act *Action, out map[string]string /*TODO review unused parameter*/) error {
+func (p *Page) ClickElement(act *Action, out map[string]string) error {
 	element, err := p.pageElementBy(act.Data)
 	if err != nil {
 		return errors.Wrap(err, errCouldNotGetElement)
@@ -357,12 +358,12 @@ func (p *Page) ClickElement(act *Action, out map[string]string /*TODO review unu
 }
 
 // KeyboardAction executes a keyboard action on the page.
-func (p *Page) KeyboardAction(act *Action, out map[string]string /*TODO review unused parameter*/) error {
+func (p *Page) KeyboardAction(act *Action, out map[string]string) error {
 	return p.page.Keyboard.Type([]input.Key(p.getActionArgWithDefaultValues(act, "keys"))...)
 }
 
 // RightClickElement executes right click actions for an element.
-func (p *Page) RightClickElement(act *Action, out map[string]string /*TODO review unused parameter*/) error {
+func (p *Page) RightClickElement(act *Action, out map[string]string) error {
 	element, err := p.pageElementBy(act.Data)
 	if err != nil {
 		return errors.Wrap(err, errCouldNotGetElement)
@@ -395,6 +396,24 @@ func (p *Page) Screenshot(act *Action, out map[string]string) error {
 	if err != nil {
 		return errors.Wrap(err, "could not take screenshot")
 	}
+	targetPath := p.getActionArgWithDefaultValues(act, "to")
+	targetPath, err = fileutil.CleanPath(targetPath)
+	if err != nil {
+		return errorutil.New("could not clean output screenshot path %s", targetPath)
+	}
+	// allow if targetPath is child of current working directory
+	if !protocolstate.IsLFAAllowed() {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return errorutil.NewWithErr(err).Msgf("could not get current working directory")
+		}
+		if !strings.HasPrefix(targetPath, cwd) {
+			// writing outside of cwd requires -lfa flag
+			return ErrLFAccessDenied
+		}
+	}
+
+	// edgecase create directory if mkdir=true and path contains directory
 	if p.getActionArgWithDefaultValues(act, "mkdir") == "true" && stringsutil.ContainsAny(to, folderutil.UnixPathSeparator, folderutil.WindowsPathSeparator) {
 		// creates new directory if needed based on path `to`
 		// TODO: replace all permission bits with fileutil constants (https://github.com/projectdiscovery/utils/issues/113)
@@ -402,8 +421,10 @@ func (p *Page) Screenshot(act *Action, out map[string]string) error {
 			return errorutil.NewWithErr(err).Msgf("failed to create directory while writing screenshot")
 		}
 	}
-	filePath := to
-	if !strings.HasSuffix(to, ".png") {
+
+	// actual file path to write
+	filePath := targetPath
+	if !strings.HasSuffix(filePath, ".png") {
 		filePath += ".png"
 	}
 
@@ -420,7 +441,7 @@ func (p *Page) Screenshot(act *Action, out map[string]string) error {
 }
 
 // InputElement executes input element actions for an element.
-func (p *Page) InputElement(act *Action, out map[string]string /*TODO review unused parameter*/) error {
+func (p *Page) InputElement(act *Action, out map[string]string) error {
 	value := p.getActionArgWithDefaultValues(act, "value")
 	if value == "" {
 		return errinvalidArguments
@@ -439,7 +460,7 @@ func (p *Page) InputElement(act *Action, out map[string]string /*TODO review unu
 }
 
 // TimeInputElement executes time input on an element
-func (p *Page) TimeInputElement(act *Action, out map[string]string /*TODO review unused parameter*/) error {
+func (p *Page) TimeInputElement(act *Action, out map[string]string) error {
 	value := p.getActionArgWithDefaultValues(act, "value")
 	if value == "" {
 		return errinvalidArguments
@@ -462,7 +483,7 @@ func (p *Page) TimeInputElement(act *Action, out map[string]string /*TODO review
 }
 
 // SelectInputElement executes select input statement action on a element
-func (p *Page) SelectInputElement(act *Action, out map[string]string /*TODO review unused parameter*/) error {
+func (p *Page) SelectInputElement(act *Action, out map[string]string) error {
 	value := p.getActionArgWithDefaultValues(act, "value")
 	if value == "" {
 		return errinvalidArguments
@@ -487,7 +508,7 @@ func (p *Page) SelectInputElement(act *Action, out map[string]string /*TODO revi
 }
 
 // WaitLoad waits for the page to load
-func (p *Page) WaitLoad(act *Action, out map[string]string /*TODO review unused parameter*/) error {
+func (p *Page) WaitLoad(act *Action, out map[string]string) error {
 	p.page.Timeout(2 * time.Second).WaitNavigation(proto.PageLifecycleEventNameFirstMeaningfulPaint)()
 
 	// Wait for the window.onload event and also wait for the network requests
@@ -517,7 +538,7 @@ func (p *Page) GetResource(act *Action, out map[string]string) error {
 }
 
 // FilesInput acts with a file input element on page
-func (p *Page) FilesInput(act *Action, out map[string]string /*TODO review unused parameter*/) error {
+func (p *Page) FilesInput(act *Action, out map[string]string) error {
 	element, err := p.pageElementBy(act.Data)
 	if err != nil {
 		return errors.Wrap(err, errCouldNotGetElement)
@@ -568,7 +589,7 @@ func (p *Page) ExtractElement(act *Action, out map[string]string) error {
 }
 
 // WaitEvent waits for an event to happen on the page.
-func (p *Page) WaitEvent(act *Action, out map[string]string /*TODO review unused parameter*/) (func() error, error) {
+func (p *Page) WaitEvent(act *Action, out map[string]string) (func() error, error) {
 	event := p.getActionArgWithDefaultValues(act, "event")
 	if event == "" {
 		return nil, errors.New("event not recognized")
@@ -640,14 +661,14 @@ func (p *Page) pageElementBy(data map[string]string) (*rod.Element, error) {
 }
 
 // DebugAction enables debug action on a page.
-func (p *Page) DebugAction(act *Action, out map[string]string /*TODO review unused parameter*/) error {
+func (p *Page) DebugAction(act *Action, out map[string]string) error {
 	p.instance.browser.engine.SlowMotion(5 * time.Second)
 	p.instance.browser.engine.Trace(true)
 	return nil
 }
 
 // SleepAction sleeps on the page for a specified duration
-func (p *Page) SleepAction(act *Action, out map[string]string /*TODO review unused parameter*/) error {
+func (p *Page) SleepAction(act *Action, out map[string]string) error {
 	seconds := act.Data["duration"]
 	if seconds == "" {
 		seconds = "5"

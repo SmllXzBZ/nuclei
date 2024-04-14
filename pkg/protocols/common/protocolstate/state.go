@@ -1,26 +1,33 @@
 package protocolstate
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/url"
 
+	"github.com/go-sql-driver/mysql"
 	"github.com/pkg/errors"
 	"golang.org/x/net/proxy"
 
 	"github.com/projectdiscovery/fastdialer/fastdialer"
+	"github.com/projectdiscovery/mapcidr/asn"
 	"github.com/projectdiscovery/networkpolicy"
 	"github.com/projectdiscovery/nuclei/v3/pkg/types"
+	"github.com/projectdiscovery/nuclei/v3/pkg/utils/expand"
 )
 
 // Dialer is a shared fastdialer instance for host DNS resolution
-var Dialer *fastdialer.Dialer
+var (
+	Dialer *fastdialer.Dialer
+)
 
 // Init creates the Dialer instance based on user configuration
 func Init(options *types.Options) error {
 	if Dialer != nil {
 		return nil
 	}
+
 	lfaAllowed = options.AllowLocalFileAccess
 	opts := fastdialer.DefaultOptions
 	if options.DialerTimeout > 0 {
@@ -29,7 +36,27 @@ func Init(options *types.Options) error {
 	if options.DialerKeepAlive > 0 {
 		opts.DialerKeepAlive = options.DialerKeepAlive
 	}
-	InitHeadless(options.RestrictLocalNetworkAccess, options.AllowLocalFileAccess)
+
+	var expandedDenyList []string
+	for _, excludeTarget := range options.ExcludeTargets {
+		switch {
+		case asn.IsASN(excludeTarget):
+			expandedDenyList = append(expandedDenyList, expand.ASN(excludeTarget)...)
+		default:
+			expandedDenyList = append(expandedDenyList, excludeTarget)
+		}
+	}
+
+	if options.RestrictLocalNetworkAccess {
+		expandedDenyList = append(expandedDenyList, networkpolicy.DefaultIPv4DenylistRanges...)
+		expandedDenyList = append(expandedDenyList, networkpolicy.DefaultIPv6DenylistRanges...)
+	}
+	npOptions := &networkpolicy.Options{
+		DenyList: expandedDenyList,
+	}
+	opts.WithNetworkPolicyOptions = npOptions
+	NetworkPolicy, _ = networkpolicy.New(*npOptions)
+	InitHeadless(options.AllowLocalFileAccess, NetworkPolicy)
 
 	switch {
 	case options.SourceIP != "" && options.Interface != "":
@@ -94,16 +121,20 @@ func Init(options *types.Options) error {
 	}
 
 	if options.SystemResolvers {
+		opts.ResolversFile = true
 		opts.EnableFallback = true
 	}
 	if options.ResolversFile != "" {
 		opts.BaseResolvers = options.InternalResolversList
 	}
-	if options.RestrictLocalNetworkAccess {
-		opts.Deny = append(networkpolicy.DefaultIPv4DenylistRanges, networkpolicy.DefaultIPv6DenylistRanges...)
-	}
+
+	opts.Deny = append(opts.Deny, expandedDenyList...)
+
 	opts.WithDialerHistory = true
 	opts.SNIName = options.SNI
+	// this instance is used in javascript protocol libraries and
+	// dial history is required to get dialed ip of a host
+	opts.WithDialerHistory = true
 
 	// fastdialer now by default fallbacks to ztls when there are tls related errors
 	dialer, err := fastdialer.NewDialer(opts)
@@ -111,6 +142,14 @@ func Init(options *types.Options) error {
 		return errors.Wrap(err, "could not create dialer")
 	}
 	Dialer = dialer
+
+	// override dialer in mysql
+	mysql.RegisterDialContext("tcp", func(ctx context.Context, addr string) (net.Conn, error) {
+		return Dialer.Dial(ctx, "tcp", addr)
+	})
+
+	StartActiveMemGuardian()
+
 	return nil
 }
 
@@ -171,4 +210,5 @@ func Close() {
 	if Dialer != nil {
 		Dialer.Close()
 	}
+	StopActiveMemGuardian()
 }

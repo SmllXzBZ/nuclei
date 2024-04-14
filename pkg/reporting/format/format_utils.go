@@ -34,7 +34,14 @@ func GetMatchedTemplateName(event *output.ResultEvent) string {
 	return matchedTemplateName
 }
 
-func CreateReportDescription(event *output.ResultEvent, formatter ResultFormatter) string {
+type reportMetadataEditorHook func(event *output.ResultEvent, formatter ResultFormatter) string
+
+var (
+	// ReportGenerationMetadataHooks are the hooks for adding metadata to the report
+	ReportGenerationMetadataHooks []reportMetadataEditorHook
+)
+
+func CreateReportDescription(event *output.ResultEvent, formatter ResultFormatter, omitRaw bool) string {
 	template := GetMatchedTemplateName(event)
 	builder := &bytes.Buffer{}
 	builder.WriteString(fmt.Sprintf("%s: %s matched at %s\n\n", formatter.MakeBold("Details"), formatter.MakeBold(template), event.Host))
@@ -47,24 +54,32 @@ func CreateReportDescription(event *output.ResultEvent, formatter ResultFormatte
 		builder.WriteString(fmt.Sprintf("%s: %s\n\n", formatter.MakeBold(key), types.ToString(data)))
 	})
 
+	if len(ReportGenerationMetadataHooks) > 0 {
+		for _, hook := range ReportGenerationMetadataHooks {
+			builder.WriteString(hook(event, formatter))
+		}
+	}
+
 	builder.WriteString(formatter.MakeBold("Template Information"))
 	builder.WriteString("\n\n")
 	builder.WriteString(CreateTemplateInfoTable(&event.Info, formatter))
 
-	if event.Request != "" {
-		builder.WriteString(formatter.CreateCodeBlock("Request", types.ToHexOrString(event.Request), "http"))
-	}
-	if event.Response != "" {
-		var responseString string
-		// If the response is larger than 5 kb, truncate it before writing.
-		maxKbSize := 5 * 1024
-		if len(event.Response) > maxKbSize {
-			responseString = event.Response[:maxKbSize]
-			responseString += ".... Truncated ...."
-		} else {
-			responseString = event.Response
+	if !omitRaw {
+		if event.Request != "" {
+			builder.WriteString(formatter.CreateCodeBlock("Request", types.ToHexOrString(event.Request), "http"))
 		}
-		builder.WriteString(formatter.CreateCodeBlock("Response", responseString, "http"))
+		if event.Response != "" {
+			var responseString string
+			// If the response is larger than 5 kb, truncate it before writing.
+			maxKbSize := 5 * 1024
+			if len(event.Response) > maxKbSize {
+				responseString = event.Response[:maxKbSize]
+				responseString += ".... Truncated ...."
+			} else {
+				responseString = event.Response
+			}
+			builder.WriteString(formatter.CreateCodeBlock("Response", responseString, "http"))
+		}
 	}
 
 	if len(event.ExtractedResults) > 0 || len(event.Metadata) > 0 {

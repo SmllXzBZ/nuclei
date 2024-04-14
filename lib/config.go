@@ -2,9 +2,14 @@ package nuclei
 
 import (
 	"context"
+	"errors"
 	"time"
 
+	"github.com/projectdiscovery/goflags"
 	"github.com/projectdiscovery/gologger"
+	"github.com/projectdiscovery/ratelimit"
+
+	"github.com/projectdiscovery/nuclei/v3/pkg/authprovider"
 	"github.com/projectdiscovery/nuclei/v3/pkg/model/types/severity"
 	"github.com/projectdiscovery/nuclei/v3/pkg/output"
 	"github.com/projectdiscovery/nuclei/v3/pkg/progress"
@@ -13,7 +18,6 @@ import (
 	"github.com/projectdiscovery/nuclei/v3/pkg/protocols/common/utils/vardump"
 	"github.com/projectdiscovery/nuclei/v3/pkg/protocols/headless/engine"
 	"github.com/projectdiscovery/nuclei/v3/pkg/templates/types"
-	"github.com/projectdiscovery/ratelimit"
 )
 
 // TemplateSources contains template sources
@@ -106,19 +110,54 @@ func WithInteractshOptions(opts InteractshOpts) NucleiSDKOptions {
 
 // Concurrency options
 type Concurrency struct {
-	TemplateConcurrency         int // number of templates to run concurrently (per host in host-spray mode)
-	HostConcurrency             int // number of hosts to scan concurrently  (per template in template-spray mode)
-	HeadlessHostConcurrency     int // number of hosts to scan concurrently for headless templates  (per template in template-spray mode)
-	HeadlessTemplateConcurrency int // number of templates to run concurrently for headless templates (per host in host-spray mode)
+	TemplateConcurrency           int // number of templates to run concurrently (per host in host-spray mode)
+	HostConcurrency               int // number of hosts to scan concurrently  (per template in template-spray mode)
+	HeadlessHostConcurrency       int // number of hosts to scan concurrently for headless templates  (per template in template-spray mode)
+	HeadlessTemplateConcurrency   int // number of templates to run concurrently for headless templates (per host in host-spray mode)
+	JavascriptTemplateConcurrency int // number of templates to run concurrently for javascript templates (per host in host-spray mode)
+	TemplatePayloadConcurrency    int // max concurrent payloads to run for a template (a good default is 25)
+	ProbeConcurrency              int // max concurrent http probes to run (a good default is 50)
 }
 
 // WithConcurrency sets concurrency options
 func WithConcurrency(opts Concurrency) NucleiSDKOptions {
 	return func(e *NucleiEngine) error {
-		e.opts.TemplateThreads = opts.TemplateConcurrency
-		e.opts.BulkSize = opts.HostConcurrency
-		e.opts.HeadlessBulkSize = opts.HeadlessHostConcurrency
-		e.opts.HeadlessTemplateThreads = opts.HeadlessTemplateConcurrency
+		// minimum required is 1
+		if opts.TemplateConcurrency <= 0 {
+			return errors.New("template threads must be at least 1")
+		} else {
+			e.opts.TemplateThreads = opts.TemplateConcurrency
+		}
+		if opts.HostConcurrency <= 0 {
+			return errors.New("host concurrency must be at least 1")
+		} else {
+			e.opts.BulkSize = opts.HostConcurrency
+		}
+		if opts.HeadlessHostConcurrency <= 0 {
+			return errors.New("headless host concurrency must be at least 1")
+		} else {
+			e.opts.HeadlessBulkSize = opts.HeadlessHostConcurrency
+		}
+		if opts.HeadlessTemplateConcurrency <= 0 {
+			return errors.New("headless template threads must be at least 1")
+		} else {
+			e.opts.HeadlessTemplateThreads = opts.HeadlessTemplateConcurrency
+		}
+		if opts.JavascriptTemplateConcurrency <= 0 {
+			return errors.New("js must be at least 1")
+		} else {
+			e.opts.JsConcurrency = opts.JavascriptTemplateConcurrency
+		}
+		if opts.TemplatePayloadConcurrency <= 0 {
+			return errors.New("payload concurrency must be at least 1")
+		} else {
+			e.opts.PayloadConcurrency = opts.TemplatePayloadConcurrency
+		}
+		if opts.ProbeConcurrency <= 0 {
+			return errors.New("probe concurrency must be at least 1")
+		} else {
+			e.opts.ProbeConcurrency = opts.ProbeConcurrency
+		}
 		return nil
 	}
 }
@@ -126,7 +165,9 @@ func WithConcurrency(opts Concurrency) NucleiSDKOptions {
 // WithGlobalRateLimit sets global rate (i.e all hosts combined) limit options
 func WithGlobalRateLimit(maxTokens int, duration time.Duration) NucleiSDKOptions {
 	return func(e *NucleiEngine) error {
-		e.rateLimiter = ratelimit.New(context.Background(), uint(maxTokens), duration)
+		e.opts.RateLimit = maxTokens
+		e.opts.RateLimitDuration = duration
+		e.rateLimiter = ratelimit.New(context.Background(), uint(e.opts.RateLimit), e.opts.RateLimitDuration)
 		return nil
 	}
 }
@@ -158,7 +199,7 @@ func EnableHeadlessWithOpts(hopts *HeadlessOpts) NucleiSDKOptions {
 		if err != nil {
 			return err
 		}
-		e.executerOpts.Browser = browser
+		e.browserInstance = browser
 		return nil
 	}
 }
@@ -220,14 +261,16 @@ func WithVerbosity(opts VerbosityOptions) NucleiSDKOptions {
 // NetworkConfig contains network config options
 // ex: retries , httpx probe , timeout etc
 type NetworkConfig struct {
-	Timeout           int      // Timeout in seconds
-	Retries           int      // Number of retries
-	LeaveDefaultPorts bool     // Leave default ports for http/https
-	MaxHostError      int      // Maximum number of host errors to allow before skipping that host
-	TrackError        []string // Adds given errors to max host error watchlist
-	DisableMaxHostErr bool     // Disable max host error optimization (Hosts are not skipped even if they are not responding)
-	Interface         string   // Interface to use for network scan
-	
+	DisableMaxHostErr     bool     // Disable max host error optimization (Hosts are not skipped even if they are not responding)
+	Interface             string   // Interface to use for network scan
+	InternalResolversList []string // Use a list of resolver
+	LeaveDefaultPorts     bool     // Leave default ports for http/https
+	MaxHostError          int      // Maximum number of host errors to allow before skipping that host
+	Retries               int      // Number of retries
+	SourceIP              string   // SourceIP sets custom source IP address for network requests
+	SystemResolvers       bool     // Use system resolvers
+	Timeout               int      // Timeout in seconds
+	TrackError            []string // Adds given errors to max host error watchlist
 }
 
 // WithNetworkConfig allows setting network config options
@@ -241,6 +284,9 @@ func WithNetworkConfig(opts NetworkConfig) NucleiSDKOptions {
 		e.opts.LeaveDefaultPorts = opts.LeaveDefaultPorts
 		e.hostErrCache = hosterrorscache.New(opts.MaxHostError, hosterrorscache.DefaultMaxHostsCount, opts.TrackError)
 		e.opts.Interface = opts.Interface
+		e.opts.SourceIP = opts.SourceIP
+		e.opts.SystemResolvers = opts.SystemResolvers
+		e.opts.InternalResolversList = opts.InternalResolversList
 		return nil
 	}
 }
@@ -327,6 +373,55 @@ func WithSandboxOptions(allowLocalFileAccess bool, restrictLocalNetworkAccess bo
 func EnableCodeTemplates() NucleiSDKOptions {
 	return func(e *NucleiEngine) error {
 		e.opts.EnableCodeTemplates = true
+		return nil
+	}
+}
+
+// WithHeaders allows setting custom header/cookie to include in all http request in header:value format
+func WithHeaders(headers []string) NucleiSDKOptions {
+	return func(e *NucleiEngine) error {
+		e.opts.CustomHeaders = headers
+		return nil
+	}
+}
+
+// EnablePassiveMode allows enabling passive HTTP response processing mode
+func EnablePassiveMode() NucleiSDKOptions {
+	return func(e *NucleiEngine) error {
+		e.opts.OfflineHTTP = true
+		return nil
+	}
+}
+
+// WithAuthOptions allows setting a custom authprovider implementation
+func WithAuthProvider(provider authprovider.AuthProvider) NucleiSDKOptions {
+	return func(e *NucleiEngine) error {
+		e.authprovider = provider
+		return nil
+	}
+}
+
+// LoadSecretsFromFile allows loading secrets from file
+func LoadSecretsFromFile(files []string, prefetch bool) NucleiSDKOptions {
+	return func(e *NucleiEngine) error {
+		e.opts.SecretsFile = goflags.StringSlice(files)
+		e.opts.PreFetchSecrets = prefetch
+		return nil
+	}
+}
+
+// DASTMode only run DAST templates
+func DASTMode() NucleiSDKOptions {
+	return func(e *NucleiEngine) error {
+		e.opts.DAST = true
+		return nil
+	}
+}
+
+// SignedTemplatesOnly only run signed templates and disabled loading all unsigned templates
+func SignedTemplatesOnly() NucleiSDKOptions {
+	return func(e *NucleiEngine) error {
+		e.opts.DisableUnsignedTemplates = true
 		return nil
 	}
 }

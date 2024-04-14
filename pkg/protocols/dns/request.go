@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"sync"
 
 	"github.com/miekg/dns"
 	"github.com/pkg/errors"
+	"go.uber.org/multierr"
 	"golang.org/x/exp/maps"
 
 	"github.com/projectdiscovery/gologger"
@@ -24,6 +26,7 @@ import (
 	"github.com/projectdiscovery/nuclei/v3/pkg/utils"
 	"github.com/projectdiscovery/retryabledns"
 	iputil "github.com/projectdiscovery/utils/ip"
+	syncutil "github.com/projectdiscovery/utils/sync"
 )
 
 var _ protocols.Request = &Request{}
@@ -53,22 +56,49 @@ func (request *Request) ExecuteWithResults(input *contextargs.Context, metadata,
 	// optionvars are vars passed from CLI or env variables
 	optionVars := generators.BuildPayloadFromOptions(request.options.Options)
 	// merge with metadata (eg. from workflow context)
-	vars = generators.MergeMaps(vars, metadata, optionVars, request.options.GetTemplateCtx(input.MetaInput).GetAll())
+	if request.options.HasTemplateCtx(input.MetaInput) {
+		vars = generators.MergeMaps(vars, metadata, optionVars, request.options.GetTemplateCtx(input.MetaInput).GetAll())
+	}
 	variablesMap := request.options.Variables.Evaluate(vars)
 	vars = generators.MergeMaps(vars, variablesMap, request.options.Constants)
 
+	// if request threads matches global payload concurrency we follow it
+	shouldFollowGlobal := request.Threads == request.options.Options.PayloadConcurrency
+
 	if request.generator != nil {
 		iterator := request.generator.NewIterator()
+		swg, err := syncutil.New(syncutil.WithSize(request.Threads))
+		if err != nil {
+			return err
+		}
+		var multiErr error
+		m := &sync.Mutex{}
 
 		for {
 			value, ok := iterator.Value()
 			if !ok {
 				break
 			}
-			value = generators.MergeMaps(vars, value)
-			if err := request.execute(input, domain, metadata, previous, value, callback); err != nil {
-				return err
+
+			// resize check point - nop if there are no changes
+			if shouldFollowGlobal && swg.Size != request.options.Options.PayloadConcurrency {
+				swg.Resize(request.options.Options.PayloadConcurrency)
 			}
+
+			value = generators.MergeMaps(vars, value)
+			swg.Add()
+			go func(newVars map[string]interface{}) {
+				defer swg.Done()
+				if err := request.execute(input, domain, metadata, previous, newVars, callback); err != nil {
+					m.Lock()
+					multiErr = multierr.Append(multiErr, err)
+					m.Unlock()
+				}
+			}(value)
+		}
+		swg.Wait()
+		if multiErr != nil {
+			return multiErr
 		}
 	} else {
 		value := maps.Clone(vars)
@@ -122,7 +152,7 @@ func (request *Request) execute(input *contextargs.Context, domain string, metad
 		}
 	}
 
-	request.options.RateLimiter.Take()
+	request.options.RateLimitTake()
 
 	// Send the request to the target servers
 	response, err := dnsClient.Do(compiledRequest)
@@ -160,7 +190,9 @@ func (request *Request) execute(input *contextargs.Context, domain string, metad
 		outputEvent[k] = v
 	}
 	// add variables from template context before matching/extraction
-	outputEvent = generators.MergeMaps(outputEvent, request.options.GetTemplateCtx(input.MetaInput).GetAll())
+	if request.options.HasTemplateCtx(input.MetaInput) {
+		outputEvent = generators.MergeMaps(outputEvent, request.options.GetTemplateCtx(input.MetaInput).GetAll())
+	}
 	event := eventcreator.CreateEvent(request, outputEvent, request.options.Options.Debug || request.options.Options.DebugResponse)
 
 	dumpResponse(event, request, request.options, response.String(), question)

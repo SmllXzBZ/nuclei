@@ -1,6 +1,7 @@
 package protocolstate
 
 import (
+	"net"
 	"strings"
 
 	"github.com/go-rod/rod"
@@ -17,7 +18,7 @@ import (
 var (
 	ErrURLDenied         = errorutil.NewWithFmt("headless: url %v dropped by rule: %v")
 	ErrHostDenied        = errorutil.NewWithFmt("host %v dropped by network policy")
-	networkPolicy        *networkpolicy.NetworkPolicy
+	NetworkPolicy        *networkpolicy.NetworkPolicy
 	allowLocalFileAccess bool
 )
 
@@ -51,14 +52,11 @@ func FailWithReason(page *rod.Page, e *proto.FetchRequestPaused) error {
 }
 
 // InitHeadless initializes headless protocol state
-func InitHeadless(RestrictLocalNetworkAccess bool, localFileAccess bool) {
+func InitHeadless(localFileAccess bool, np *networkpolicy.NetworkPolicy) {
 	allowLocalFileAccess = localFileAccess
-	if !RestrictLocalNetworkAccess {
-		return
+	if np != nil {
+		NetworkPolicy = np
 	}
-	networkPolicy, _ = networkpolicy.New(networkpolicy.Options{
-		DenyList: append(networkpolicy.DefaultIPv4DenylistRanges, networkpolicy.DefaultIPv6DenylistRanges...),
-	})
 }
 
 // isValidHost checks if the host is valid (only limited to http/https protocols)
@@ -66,7 +64,7 @@ func isValidHost(targetUrl string) bool {
 	if !stringsutil.HasPrefixAny(targetUrl, "http:", "https:") {
 		return true
 	}
-	if networkPolicy == nil {
+	if NetworkPolicy == nil {
 		return true
 	}
 	urlx, err := urlutil.Parse(targetUrl)
@@ -75,15 +73,33 @@ func isValidHost(targetUrl string) bool {
 		return false
 	}
 	targetUrl = urlx.Hostname()
-	_, ok := networkPolicy.ValidateHost(targetUrl)
+	_, ok := NetworkPolicy.ValidateHost(targetUrl)
 	return ok
 }
 
 // IsHostAllowed checks if the host is allowed by network policy
 func IsHostAllowed(targetUrl string) bool {
-	if networkPolicy == nil {
+	if NetworkPolicy == nil {
 		return true
 	}
-	_, ok := networkPolicy.ValidateHost(targetUrl)
+	sepCount := strings.Count(targetUrl, ":")
+	if sepCount > 1 {
+		// most likely a ipv6 address (parse url and validate host)
+		return NetworkPolicy.Validate(targetUrl)
+	}
+	if sepCount == 1 {
+		host, _, _ := net.SplitHostPort(targetUrl)
+		if _, ok := NetworkPolicy.ValidateHost(host); !ok {
+			return false
+		}
+		return true
+		// portInt, _ := strconv.Atoi(port)
+		// fixme:  broken port validation logic in networkpolicy
+		// if !NetworkPolicy.ValidatePort(portInt) {
+		// 	return false
+		// }
+	}
+	// just a hostname or ip without port
+	_, ok := NetworkPolicy.ValidateHost(targetUrl)
 	return ok
 }

@@ -3,6 +3,7 @@ package output
 import (
 	"bytes"
 	"strconv"
+	"strings"
 
 	"github.com/projectdiscovery/nuclei/v3/pkg/types"
 	mapsutil "github.com/projectdiscovery/utils/maps"
@@ -57,6 +58,13 @@ func (w *StandardWriter) formatScreen(output *ResultEvent) []byte {
 		builder.WriteString(" [")
 
 		for i, item := range output.ExtractedResults {
+			// trim trailing space
+			// quote non-ascii and non printable characters and then
+			// unquote quotes (`"`) for readability
+			item = strings.TrimSpace(item)
+			item = strconv.QuoteToASCII(item)
+			item = strings.ReplaceAll(item, `\"`, `"`)
+
 			builder.WriteString(w.aurora.BrightCyan(item).String())
 
 			if i != len(output.ExtractedResults)-1 {

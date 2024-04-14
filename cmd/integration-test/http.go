@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,7 +20,6 @@ import (
 	"github.com/projectdiscovery/nuclei/v3/pkg/testutils"
 	"github.com/projectdiscovery/retryablehttp-go"
 	errorutil "github.com/projectdiscovery/utils/errors"
-	fileutil "github.com/projectdiscovery/utils/file"
 	logutil "github.com/projectdiscovery/utils/log"
 	sliceutil "github.com/projectdiscovery/utils/slice"
 	stringsutil "github.com/projectdiscovery/utils/strings"
@@ -77,12 +75,62 @@ var httpTestcases = []TestCaseInfo{
 	{Path: "protocols/http/get-without-scheme.yaml", TestCase: &httpGetWithoutScheme{}},
 	{Path: "protocols/http/cl-body-without-header.yaml", TestCase: &httpCLBodyWithoutHeader{}},
 	{Path: "protocols/http/cl-body-with-header.yaml", TestCase: &httpCLBodyWithHeader{}},
-	{Path: "protocols/http/save-extractor-values-to-file.yaml", TestCase: &httpSaveExtractorValuesToFile{}},
 	{Path: "protocols/http/cli-with-constants.yaml", TestCase: &ConstantWithCliVar{}},
 	{Path: "protocols/http/matcher-status.yaml", TestCase: &matcherStatusTest{}},
 	{Path: "protocols/http/disable-path-automerge.yaml", TestCase: &httpDisablePathAutomerge{}},
 	{Path: "protocols/http/http-preprocessor.yaml", TestCase: &httpPreprocessor{}},
 	{Path: "protocols/http/multi-request.yaml", TestCase: &httpMultiRequest{}},
+	{Path: "protocols/http/http-matcher-extractor-dy-extractor.yaml", TestCase: &httpMatcherExtractorDynamicExtractor{}},
+	{Path: "protocols/http/multi-http-var-sharing.yaml", TestCase: &httpMultiVarSharing{}},
+	{Path: "protocols/http/raw-path-single-slash.yaml", TestCase: &httpRawPathSingleSlash{}},
+	{Path: "protocols/http/raw-unsafe-path-single-slash.yaml", TestCase: &httpRawUnsafePathSingleSlash{}},
+}
+
+type httpMultiVarSharing struct{}
+
+func (h *httpMultiVarSharing) Execute(filePath string) error {
+	results, err := testutils.RunNucleiTemplateAndGetResults(filePath, "https://scanme.sh", debug)
+	if err != nil {
+		return err
+	}
+	return expectResultsCount(results, 1)
+}
+
+type httpMatcherExtractorDynamicExtractor struct{}
+
+func (h *httpMatcherExtractorDynamicExtractor) Execute(filePath string) error {
+	router := httprouter.New()
+	router.GET("/", func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+		html := `<!DOCTYPE html>
+<html lang="en">
+<body>
+    <a href="/domains">Domains</a>
+</body>
+</html>`
+		fmt.Fprint(w, html)
+	})
+	router.GET("/domains", func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+		html := `<!DOCTYPE html>
+		<html lang="en">
+		<head>
+			<title>Dynamic Extractor Test</title>
+		</head>
+		<body>
+			<!-- The content of the title tag matches the regex pattern for both the extractor and matcher for 'title' -->
+		</body>
+		</html>
+		`
+		fmt.Fprint(w, html)
+	})
+	ts := httptest.NewServer(router)
+	defer ts.Close()
+
+	results, err := testutils.RunNucleiTemplateAndGetResults(filePath, ts.URL, debug)
+	if err != nil {
+		return err
+	}
+
+	return expectResultsCount(results, 1)
 }
 
 type httpInteractshRequest struct{}
@@ -371,6 +419,7 @@ func (h *httpDSLFunctions) Execute(filePath string) error {
 	}
 
 	for _, header := range extracted {
+		header = strings.Trim(header, `"`)
 		parts := strings.Split(header, ": ")
 		index, err := strconv.Atoi(parts[0])
 		if err != nil {
@@ -778,8 +827,18 @@ func (h *httpPaths) Execute(filepath string) error {
 		}
 	}
 
-	if !reflect.DeepEqual(expected, actual) {
-		return fmt.Errorf("%8v: %v\n%-8v: %v", "expected", expected, "actual", actual)
+	if len(expected) > len(actual) {
+		actualValuesIndex := len(actual) - 1
+		if actualValuesIndex < 0 {
+			actualValuesIndex = 0
+		}
+		return fmt.Errorf("missing values : %v", expected[actualValuesIndex:])
+	} else if len(expected) < len(actual) {
+		return fmt.Errorf("unexpected values : %v", actual[len(expected)-1:])
+	} else {
+		if !reflect.DeepEqual(expected, actual) {
+			return fmt.Errorf("expected: %v\n\nactual: %v", expected, actual)
+		}
 	}
 	return nil
 }
@@ -1382,34 +1441,6 @@ func (h *httpCLBodyWithHeader) Execute(filePath string) error {
 	return expectResultsCount(got, 1)
 }
 
-type httpSaveExtractorValuesToFile struct{}
-
-func (h *httpSaveExtractorValuesToFile) Execute(filePath string) error {
-	router := httprouter.New()
-	router.GET("/", func(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
-		var buff bytes.Buffer
-		for i := 0; i < 10; i++ {
-			buff.WriteString(fmt.Sprintf(`"value": %v`+"\n", i))
-		}
-		_, _ = w.Write(buff.Bytes())
-	})
-	ts := httptest.NewServer(router)
-	defer ts.Close()
-
-	results, err := testutils.RunNucleiTemplateAndGetResults(filePath, ts.URL, debug)
-	if err != nil {
-		return err
-	}
-
-	// remove output.txt file if exists
-	if !fileutil.FileExists("output.txt") {
-		return fmt.Errorf("extractor output file output.txt file does not exist")
-	} else {
-		_ = os.Remove("output.txt")
-	}
-	return expectResultsCount(results, 1)
-}
-
 // constant shouldn't be overwritten by cli var with same name
 type ConstantWithCliVar struct{}
 
@@ -1530,4 +1561,54 @@ func (h *httpMultiRequest) Execute(filePath string) error {
 	}
 
 	return expectResultsCount(results, 1)
+}
+
+type httpRawPathSingleSlash struct{}
+
+func (h *httpRawPathSingleSlash) Execute(filepath string) error {
+	expectedPath := "/index.php"
+	results, err := testutils.RunNucleiBinaryAndGetCombinedOutput(debug, []string{"-t", filepath, "-u", "scanme.sh/index.php", "-debug-req"})
+	if err != nil {
+		return err
+	}
+
+	var actual string
+	for _, v := range strings.Split(results, "\n") {
+		if strings.Contains(v, "GET") {
+			parts := strings.Fields(v)
+			if len(parts) == 3 {
+				actual = parts[1]
+			}
+		}
+	}
+
+	if actual != expectedPath {
+		return fmt.Errorf("expected: %v\n\nactual: %v", expectedPath, actual)
+	}
+	return nil
+}
+
+type httpRawUnsafePathSingleSlash struct{}
+
+func (h *httpRawUnsafePathSingleSlash) Execute(filepath string) error {
+	expectedPath := "/index.php"
+	results, err := testutils.RunNucleiBinaryAndGetCombinedOutput(debug, []string{"-t", filepath, "-u", "scanme.sh/index.php", "-debug-req"})
+	if err != nil {
+		return err
+	}
+
+	var actual string
+	for _, v := range strings.Split(results, "\n") {
+		if strings.Contains(v, "GET") {
+			parts := strings.Fields(v)
+			if len(parts) == 3 {
+				actual = parts[1]
+			}
+		}
+	}
+
+	if actual != expectedPath {
+		return fmt.Errorf("expected: %v\n\nactual: %v", expectedPath, actual)
+	}
+	return nil
 }

@@ -2,7 +2,7 @@ package main
 
 import (
 	nuclei "github.com/projectdiscovery/nuclei/v3/lib"
-	"github.com/remeh/sizedwaitgroup"
+	syncutil "github.com/projectdiscovery/utils/sync"
 )
 
 func main() {
@@ -12,7 +12,10 @@ func main() {
 		panic(err)
 	}
 	// setup sizedWaitgroup to handle concurrency
-	sg := sizedwaitgroup.New(10)
+	sg, err := syncutil.New(syncutil.WithSize(10))
+	if err != nil {
+		panic(err)
+	}
 
 	// scan 1 = run dns templates on scanme.sh
 	sg.Add()
@@ -20,6 +23,8 @@ func main() {
 		defer sg.Done()
 		err = ne.ExecuteNucleiWithOpts([]string{"scanme.sh"},
 			nuclei.WithTemplateFilters(nuclei.TemplateFilters{ProtocolTypes: "dns"}),
+			nuclei.WithHeaders([]string{"X-Bug-Bounty: pdteam"}),
+			nuclei.EnablePassiveMode(),
 		)
 		if err != nil {
 			panic(err)

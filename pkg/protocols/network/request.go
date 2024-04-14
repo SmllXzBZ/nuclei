@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/pkg/errors"
@@ -32,6 +33,7 @@ import (
 	errorutil "github.com/projectdiscovery/utils/errors"
 	mapsutil "github.com/projectdiscovery/utils/maps"
 	"github.com/projectdiscovery/utils/reader"
+	syncutil "github.com/projectdiscovery/utils/sync"
 )
 
 var (
@@ -136,7 +138,9 @@ func (request *Request) executeOnTarget(input *contextargs.Context, visited maps
 	}
 	variables := protocolutils.GenerateVariables(address, false, nil)
 	// add template ctx variables to varMap
-	variables = generators.MergeMaps(variables, request.options.GetTemplateCtx(input.MetaInput).GetAll())
+	if request.options.HasTemplateCtx(input.MetaInput) {
+		variables = generators.MergeMaps(variables, request.options.GetTemplateCtx(input.MetaInput).GetAll())
+	}
 	variablesMap := request.options.Variables.Evaluate(variables)
 	variables = generators.MergeMaps(variablesMap, variables, request.options.Constants)
 
@@ -170,18 +174,43 @@ func (request *Request) executeAddress(variables map[string]interface{}, actualA
 		return err
 	}
 
+	// if request threads matches global payload concurrency we follow it
+	shouldFollowGlobal := request.Threads == request.options.Options.PayloadConcurrency
+
 	if request.generator != nil {
 		iterator := request.generator.NewIterator()
+		var multiErr error
+		m := &sync.Mutex{}
+		swg, err := syncutil.New(syncutil.WithSize(request.Threads))
+		if err != nil {
+			return err
+		}
 
 		for {
 			value, ok := iterator.Value()
 			if !ok {
 				break
 			}
-			value = generators.MergeMaps(value, payloads)
-			if err := request.executeRequestWithPayloads(variables, actualAddress, address, input, shouldUseTLS, value, previous, callback); err != nil {
-				return err
+
+			// resize check point - nop if there are no changes
+			if shouldFollowGlobal && swg.Size != request.options.Options.PayloadConcurrency {
+				swg.Resize(request.options.Options.PayloadConcurrency)
 			}
+
+			value = generators.MergeMaps(value, payloads)
+			swg.Add()
+			go func(vars map[string]interface{}) {
+				defer swg.Done()
+				if err := request.executeRequestWithPayloads(variables, actualAddress, address, input, shouldUseTLS, vars, previous, callback); err != nil {
+					m.Lock()
+					multiErr = multierr.Append(multiErr, err)
+					m.Unlock()
+				}
+			}(value)
+		}
+		swg.Wait()
+		if multiErr != nil {
+			return multiErr
 		}
 	} else {
 		value := maps.Clone(payloads)
@@ -319,7 +348,7 @@ func (request *Request) executeRequestWithPayloads(variables map[string]interfac
 	final, err := ConnReadNWithTimeout(conn, int64(bufferSize), DefaultReadTimeout)
 	if err != nil {
 		request.options.Output.Request(request.options.TemplatePath, address, request.Type().String(), err)
-		return errors.Wrap(err, "could not read from server")
+		gologger.Verbose().Msgf("could not read more data from %s: %s", actualAddress, err)
 	}
 	responseBuilder.Write(final)
 
@@ -327,7 +356,9 @@ func (request *Request) executeRequestWithPayloads(variables map[string]interfac
 	outputEvent := request.responseToDSLMap(reqBuilder.String(), string(final), response, input.MetaInput.Input, actualAddress)
 	// add response fields to template context and merge templatectx variables to output event
 	request.options.AddTemplateVars(input.MetaInput, request.Type(), request.ID, outputEvent)
-	outputEvent = generators.MergeMaps(outputEvent, request.options.GetTemplateCtx(input.MetaInput).GetAll())
+	if request.options.HasTemplateCtx(input.MetaInput) {
+		outputEvent = generators.MergeMaps(outputEvent, request.options.GetTemplateCtx(input.MetaInput).GetAll())
+	}
 	outputEvent["ip"] = request.dialer.GetDialedIP(hostname)
 	if request.options.StopAtFirstMatch {
 		outputEvent["stop-at-first-match"] = true

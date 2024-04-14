@@ -10,9 +10,11 @@ import (
 
 	"github.com/logrusorgru/aurora"
 
+	"github.com/projectdiscovery/nuclei/v3/pkg/authprovider"
 	"github.com/projectdiscovery/nuclei/v3/pkg/catalog"
 	"github.com/projectdiscovery/nuclei/v3/pkg/input"
 	"github.com/projectdiscovery/nuclei/v3/pkg/js/compiler"
+	"github.com/projectdiscovery/nuclei/v3/pkg/loader/parser"
 	"github.com/projectdiscovery/nuclei/v3/pkg/model"
 	"github.com/projectdiscovery/nuclei/v3/pkg/operators"
 	"github.com/projectdiscovery/nuclei/v3/pkg/operators/extractors"
@@ -32,7 +34,9 @@ import (
 	"github.com/projectdiscovery/nuclei/v3/pkg/types"
 )
 
-var MaxTemplateFileSizeForEncoding = 1024 * 1024
+var (
+	MaxTemplateFileSizeForEncoding = 1024 * 1024
+)
 
 // Executer is an interface implemented any protocol based request executer.
 type Executer interface {
@@ -107,6 +111,35 @@ type ExecutorOptions struct {
 	// JsCompiler is abstracted javascript compiler which adds node modules and provides execution
 	// environment for javascript templates
 	JsCompiler *compiler.Compiler
+	// AuthProvider is a provider for auth strategies
+	AuthProvider authprovider.AuthProvider
+	//TemporaryDirectory is the directory to store temporary files
+	TemporaryDirectory string
+	Parser             parser.Parser
+	// ExportReqURLPattern exports the request URL pattern
+	// in ResultEvent it contains the exact url pattern (ex: {{BaseURL}}/{{randstr}}/xyz) used in the request
+	ExportReqURLPattern bool
+}
+
+// todo: centralizing components is not feasible with current clogged architecture
+// a possible approach could be an internal event bus with pub-subs? This would be less invasive than
+// reworking dep injection from scratch
+func (eo *ExecutorOptions) RateLimitTake() {
+	if eo.RateLimiter.GetLimit() != uint(eo.Options.RateLimit) {
+		eo.RateLimiter.SetLimit(uint(eo.Options.RateLimit))
+		eo.RateLimiter.SetDuration(eo.Options.RateLimitDuration)
+	}
+	eo.RateLimiter.Take()
+}
+
+// GetThreadsForPayloadRequests returns the number of threads to use as default for
+// given max-request of payloads
+func (e *ExecutorOptions) GetThreadsForNPayloadRequests(totalRequests int, currentThreads int) int {
+	if currentThreads > 0 {
+		return currentThreads
+	}
+
+	return e.Options.PayloadConcurrency
 }
 
 // CreateTemplateCtxStore creates template context store (which contains templateCtx for every scan)
@@ -125,6 +158,15 @@ func (e *ExecutorOptions) RemoveTemplateCtx(input *contextargs.MetaInput) {
 	}
 }
 
+// HasTemplateCtx returns true if template context exists for given input
+func (e *ExecutorOptions) HasTemplateCtx(input *contextargs.MetaInput) bool {
+	scanId := input.GetScanHash(e.TemplateID)
+	if e.templateCtxStore != nil {
+		return e.templateCtxStore.Has(scanId)
+	}
+	return false
+}
+
 // GetTemplateCtx returns template context for given input
 func (e *ExecutorOptions) GetTemplateCtx(input *contextargs.MetaInput) *contextargs.Context {
 	scanId := input.GetScanHash(e.TemplateID)
@@ -132,6 +174,7 @@ func (e *ExecutorOptions) GetTemplateCtx(input *contextargs.MetaInput) *contexta
 	if !ok {
 		// if template context does not exist create new and add it to store and return it
 		templateCtx = contextargs.New()
+		templateCtx.MetaInput = input
 		_ = e.templateCtxStore.Set(scanId, templateCtx)
 	}
 	return templateCtx
@@ -215,7 +258,17 @@ type Request interface {
 type OutputEventCallback func(result *output.InternalWrappedEvent)
 
 func MakeDefaultResultEvent(request Request, wrapped *output.InternalWrappedEvent) []*output.ResultEvent {
+	// Note: operator result is generated if something was succesfull match/extract/dynamic-extract
+	// but results should not be generated if
+	// 1. no match was found and some dynamic values were extracted
+	// 2. if something was extracted (matchers exist but no match was found)
 	if len(wrapped.OperatorsResult.DynamicValues) > 0 && !wrapped.OperatorsResult.Matched {
+		return nil
+	}
+	// check if something was extracted (except dynamic values)
+	extracted := len(wrapped.OperatorsResult.Extracts) > 0 || len(wrapped.OperatorsResult.OutputExtracts) > 0
+	if extracted && len(wrapped.OperatorsResult.Operators.Matchers) > 0 && !wrapped.OperatorsResult.Matched {
+		// if extracted and matchers exist but no match was found then don't generate result
 		return nil
 	}
 

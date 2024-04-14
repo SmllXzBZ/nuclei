@@ -1,6 +1,7 @@
 package templates
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -17,12 +18,11 @@ import (
 	"github.com/projectdiscovery/nuclei/v3/pkg/js/compiler"
 	"github.com/projectdiscovery/nuclei/v3/pkg/operators"
 	"github.com/projectdiscovery/nuclei/v3/pkg/protocols"
+	"github.com/projectdiscovery/nuclei/v3/pkg/protocols/common/generators"
 	"github.com/projectdiscovery/nuclei/v3/pkg/protocols/offlinehttp"
-	"github.com/projectdiscovery/nuclei/v3/pkg/templates/cache"
 	"github.com/projectdiscovery/nuclei/v3/pkg/templates/signer"
 	"github.com/projectdiscovery/nuclei/v3/pkg/tmplexec"
 	"github.com/projectdiscovery/nuclei/v3/pkg/utils"
-	"github.com/projectdiscovery/retryablehttp-go"
 	errorutil "github.com/projectdiscovery/utils/errors"
 	stringsutil "github.com/projectdiscovery/utils/strings"
 )
@@ -30,17 +30,16 @@ import (
 var (
 	ErrCreateTemplateExecutor          = errors.New("cannot create template executer")
 	ErrIncompatibleWithOfflineMatching = errors.New("template can't be used for offline matching")
-	parsedTemplatesCache               *cache.Templates
 	// track how many templates are verfied and by which signer
 	SignatureStats = map[string]*atomic.Uint64{}
 )
 
 const (
-	Unsigned = "unsigned"
+	Unsigned   = "unsigned"
+	PDVerifier = "projectdiscovery/nuclei-templates"
 )
 
 func init() {
-	parsedTemplatesCache = cache.New()
 	for _, verifier := range signer.DefaultTemplateVerifiers {
 		SignatureStats[verifier.Identifier()] = &atomic.Uint64{}
 	}
@@ -49,31 +48,34 @@ func init() {
 
 // Parse parses a yaml request template file
 // TODO make sure reading from the disk the template parsing happens once: see parsers.ParseTemplate vs templates.Parse
-//
-//nolint:gocritic // this cannot be passed by pointer
 func Parse(filePath string, preprocessor Preprocessor, options protocols.ExecutorOptions) (*Template, error) {
+	parser, ok := options.Parser.(*Parser)
+	if !ok {
+		panic("not a parser")
+	}
 	if !options.DoNotCache {
-		if value, err := parsedTemplatesCache.Has(filePath); value != nil {
-			return value.(*Template), err
+		if value, _, err := parser.compiledTemplatesCache.Has(filePath); value != nil {
+			return value, err
 		}
 	}
 
 	var reader io.ReadCloser
-	if utils.IsURL(filePath) {
-		// use retryablehttp (tls verification is enabled by default in the standard library)
-		resp, err := retryablehttp.DefaultClient().Get(filePath)
-		if err != nil {
-			return nil, err
+	if !options.DoNotCache {
+		_, raw, err := parser.parsedTemplatesCache.Has(filePath)
+		if err == nil && raw != nil {
+			reader = io.NopCloser(bytes.NewReader(raw))
 		}
-		reader = resp.Body
-	} else {
-		var err error
-		reader, err = options.Catalog.OpenFile(filePath)
+	}
+	var err error
+	if reader == nil {
+		reader, err = utils.ReaderFromPathOrURL(filePath, options.Catalog)
 		if err != nil {
 			return nil, err
 		}
 	}
+
 	defer reader.Close()
+
 	options.TemplatePath = filePath
 	template, err := ParseTemplateFromReader(reader, preprocessor, options.Copy())
 	if err != nil {
@@ -89,7 +91,7 @@ func Parse(filePath string, preprocessor Preprocessor, options protocols.Executo
 	}
 	template.Path = filePath
 	if !options.DoNotCache {
-		parsedTemplatesCache.Store(filePath, template, err)
+		parser.compiledTemplatesCache.Store(filePath, template, nil, err)
 	}
 	return template, nil
 }
@@ -183,8 +185,9 @@ func (template *Template) compileProtocolRequests(options *protocols.ExecutorOpt
 			requests = append(requests, template.convertRequestToProtocolsRequest(template.RequestsJavascript)...)
 		}
 	}
-	template.Executer = tmplexec.NewTemplateExecuter(requests, options)
-	return nil
+	var err error
+	template.Executer, err = tmplexec.NewTemplateExecuter(requests, options)
+	return err
 }
 
 // convertRequestToProtocolsRequest is a convenience wrapper to convert
@@ -228,8 +231,13 @@ mainLoop:
 	}
 	if len(operatorsList) > 0 {
 		options.Operators = operatorsList
-		template.Executer = tmplexec.NewTemplateExecuter([]protocols.Request{&offlinehttp.Request{}}, options)
-		return nil
+		var err error
+		template.Executer, err = tmplexec.NewTemplateExecuter([]protocols.Request{&offlinehttp.Request{}}, options)
+		if err != nil {
+			// it seems like flow executor cannot be used for offline http matching (ex:http(1) && http(2))
+			return ErrIncompatibleWithOfflineMatching
+		}
+		return err
 	}
 
 	return ErrIncompatibleWithOfflineMatching
@@ -265,7 +273,6 @@ func ParseTemplateFromReader(reader io.Reader, preprocessor Preprocessor, option
 			if config.DefaultConfig.LogAllEvents {
 				gologger.DefaultLogger.Print().Msgf("[%v] Template %s is not signed or tampered\n", aurora.Yellow("WRN").String(), template.ID)
 			}
-			SignatureStats[Unsigned].Add(1)
 		}
 		return template, nil
 	}
@@ -286,17 +293,24 @@ func ParseTemplateFromReader(reader io.Reader, preprocessor Preprocessor, option
 		if config.DefaultConfig.LogAllEvents {
 			gologger.DefaultLogger.Print().Msgf("[%v] Template %s is not signed or tampered\n", aurora.Yellow("WRN").String(), template.ID)
 		}
-		SignatureStats[Unsigned].Add(1)
 	}
 
+	generatedConstants := map[string]interface{}{}
 	// ==== execute preprocessors ======
 	for _, v := range allPreprocessors {
-		data = v.Process(data)
+		var replaced map[string]interface{}
+		data, replaced = v.ProcessNReturnData(data)
+		// preprocess kind of act like a constant and are generated while loading
+		// and stay constant for the template lifecycle
+		generatedConstants = generators.MergeMaps(generatedConstants, replaced)
 	}
 	reParsed, err := parseTemplate(data, options)
 	if err != nil {
 		return nil, err
 	}
+	// add generated constants to constants map and executer options
+	reParsed.Constants = generators.MergeMaps(reParsed.Constants, generatedConstants)
+	reParsed.Options.Constants = reParsed.Constants
 	reParsed.Verified = isVerified
 	return reParsed, nil
 }
@@ -384,7 +398,7 @@ func parseTemplate(data []byte, options protocols.ExecutorOptions) (*Template, e
 	for _, verifier = range signer.DefaultTemplateVerifiers {
 		template.Verified, _ = verifier.Verify(data, template)
 		if template.Verified {
-			SignatureStats[verifier.Identifier()].Add(1)
+			template.TemplateVerifier = verifier.Identifier()
 			break
 		}
 	}

@@ -132,7 +132,10 @@ type Options struct {
 	Retries int
 	// Rate-Limit is the maximum number of requests per specified target
 	RateLimit int
+	// Rate Limit Duration interval between burst resets
+	RateLimitDuration time.Duration
 	// Rate-Limit is the maximum number of requests per minute for specified target
+	// Deprecated: Use RateLimitDuration - automatically set Rate Limit Duration to 60 seconds
 	RateLimitMinute int
 	// PageTimeout is the maximum time to wait for a page in seconds
 	PageTimeout int
@@ -270,6 +273,8 @@ type Options struct {
 	DisableRedirects bool
 	// SNI custom hostname
 	SNI string
+	// InputFileMode specifies the mode of input file (jsonl, burp, openapi, swagger, etc)
+	InputFileMode string
 	// DialerTimeout sets the timeout for network requests.
 	DialerTimeout time.Duration
 	// DialerKeepAlive sets the keep alive duration for network requests.
@@ -362,8 +367,28 @@ type Options struct {
 	SignTemplates bool
 	// EnableCodeTemplates enables code templates
 	EnableCodeTemplates bool
+	// DisableUnsignedTemplates disables processing of unsigned templates
+	DisableUnsignedTemplates bool
 	// Disables cloud upload
 	EnableCloudUpload bool
+	// ScanID is the scan ID to use for cloud upload
+	ScanID string
+	// JsConcurrency is the number of concurrent js routines to run
+	JsConcurrency int
+	// SecretsFile is file containing secrets for nuclei
+	SecretsFile goflags.StringSlice
+	// PreFetchSecrets pre-fetches the secrets from the auth provider
+	PreFetchSecrets bool
+	// FormatUseRequiredOnly only uses required fields when generating requests
+	FormatUseRequiredOnly bool
+	// SkipFormatValidation is used to skip format validation
+	SkipFormatValidation bool
+	// PayloadConcurrency is the number of concurrent payloads to run per template
+	PayloadConcurrency int
+	// ProbeConcurrency is the number of concurrent http probes to run with httpx
+	ProbeConcurrency int
+	// Dast only runs DAST templates
+	DAST bool
 }
 
 // ShouldLoadResume resume file
@@ -390,6 +415,7 @@ func (options *Options) HasClientCertificates() bool {
 func DefaultOptions() *Options {
 	return &Options{
 		RateLimit:               150,
+		RateLimitDuration:       time.Second,
 		BulkSize:                25,
 		TemplateThreads:         25,
 		HeadlessBulkSize:        10,

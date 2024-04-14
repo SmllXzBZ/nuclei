@@ -262,9 +262,9 @@ func createReportingOptions(options *types.Options) (*reporting.Options, error) 
 	}
 	if options.MarkdownExportDirectory != "" {
 		reportingOptions.MarkdownExporter = &markdown.Options{
-			Directory:         options.MarkdownExportDirectory,
-			IncludeRawPayload: !options.OmitRawRequests,
-			SortMode:          options.MarkdownExportSortMode,
+			Directory: options.MarkdownExportDirectory,
+			OmitRaw:   options.OmitRawRequests,
+			SortMode:  options.MarkdownExportSortMode,
 		}
 	}
 	if options.SarifExport != "" {
@@ -272,28 +272,37 @@ func createReportingOptions(options *types.Options) (*reporting.Options, error) 
 	}
 	if options.JSONExport != "" {
 		reportingOptions.JSONExporter = &jsonexporter.Options{
-			File:              options.JSONExport,
-			IncludeRawPayload: !options.OmitRawRequests,
+			File:    options.JSONExport,
+			OmitRaw: options.OmitRawRequests,
 		}
 	}
 	if options.JSONLExport != "" {
 		reportingOptions.JSONLExporter = &jsonl.Options{
-			File:              options.JSONLExport,
-			IncludeRawPayload: !options.OmitRawRequests,
+			File:    options.JSONLExport,
+			OmitRaw: options.OmitRawRequests,
 		}
 	}
 
+	reportingOptions.OmitRaw = options.OmitRawRequests
 	return reportingOptions, nil
 }
 
 // configureOutput configures the output logging levels to be displayed on the screen
 func configureOutput(options *types.Options) {
-	// If the user desires verbose output, show verbose output
-	if options.Verbose || options.Validate {
-		gologger.DefaultLogger.SetMaxLevel(levels.LevelVerbose)
+	// disable standard logger (ref: https://github.com/golang/go/issues/19895)
+	defer logutil.DisableDefaultLogger()
+
+	if options.NoColor {
+		gologger.DefaultLogger.SetFormatter(formatter.NewCLI(true))
 	}
+	// If the user desires verbose output, show verbose output
 	if options.Debug || options.DebugRequests || options.DebugResponse {
 		gologger.DefaultLogger.SetMaxLevel(levels.LevelDebug)
+	}
+	// Debug takes precedence before verbose
+	// because debug is a lower logging level.
+	if options.Verbose || options.Validate {
+		gologger.DefaultLogger.SetMaxLevel(levels.LevelVerbose)
 	}
 	if options.NoColor {
 		gologger.DefaultLogger.SetFormatter(formatter.NewCLI(true))
@@ -301,9 +310,6 @@ func configureOutput(options *types.Options) {
 	if options.Silent {
 		gologger.DefaultLogger.SetMaxLevel(levels.LevelSilent)
 	}
-
-	// disable standard logger (ref: https://github.com/golang/go/issues/19895)
-	logutil.DisableDefaultLogger()
 }
 
 // loadResolvers loads resolvers from both user-provided flags and file
