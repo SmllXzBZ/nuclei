@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -27,9 +28,13 @@ import (
 	"github.com/projectdiscovery/nuclei/v3/pkg/operators"
 	protocolUtils "github.com/projectdiscovery/nuclei/v3/pkg/protocols/utils"
 	"github.com/projectdiscovery/nuclei/v3/pkg/types"
+	"github.com/projectdiscovery/nuclei/v3/pkg/types/nucleierr"
 	"github.com/projectdiscovery/nuclei/v3/pkg/utils"
+	"github.com/projectdiscovery/utils/errkit"
 	fileutil "github.com/projectdiscovery/utils/file"
 	osutils "github.com/projectdiscovery/utils/os"
+	unitutils "github.com/projectdiscovery/utils/unit"
+	urlutil "github.com/projectdiscovery/utils/url"
 )
 
 // Writer is an interface which writes output to somewhere for nuclei events.
@@ -66,6 +71,7 @@ type StandardWriter struct {
 	omitTemplate          bool
 	DisableStdout         bool
 	AddNewLinesOutputFile bool // by default this is only done for stdout
+	KeysToRedact          []string
 }
 
 var decolorizerRegex = regexp.MustCompile(`\x1B\[[0-9;]*[a-zA-Z]`)
@@ -175,6 +181,14 @@ type ResultEvent struct {
 	// must be enabled by setting protocols.ExecuterOptions.ExportReqURLPattern to true
 	ReqURLPattern string `json:"req_url_pattern,omitempty"`
 
+	// Fields related to HTTP Fuzzing functionality of nuclei.
+	// The output contains additional fields when the result is
+	// for a fuzzing template.
+	IsFuzzingResult  bool   `json:"is_fuzzing_result,omitempty"`
+	FuzzingMethod    string `json:"fuzzing_method,omitempty"`
+	FuzzingParameter string `json:"fuzzing_parameter,omitempty"`
+	FuzzingPosition  string `json:"fuzzing_position,omitempty"`
+
 	FileToIndexPosition map[string]int `json:"-"`
 	Error               string         `json:"error,omitempty"`
 }
@@ -240,6 +254,7 @@ func NewStandardWriter(options *types.Options) (*StandardWriter, error) {
 		storeResponse:    options.StoreResponse,
 		storeResponseDir: options.StoreResponseDir,
 		omitTemplate:     options.OmitTemplate,
+		KeysToRedact:     options.Redact,
 	}
 	return writer, nil
 }
@@ -249,6 +264,13 @@ func (w *StandardWriter) Write(event *ResultEvent) error {
 	// Enrich the result event with extra metadata on the template-path and url.
 	if event.TemplatePath != "" {
 		event.Template, event.TemplateURL = utils.TemplatePathURL(types.ToString(event.TemplatePath), types.ToString(event.TemplateID))
+	}
+
+	if len(w.KeysToRedact) > 0 {
+		event.Request = redactKeys(event.Request, w.KeysToRedact)
+		event.Response = redactKeys(event.Response, w.KeysToRedact)
+		event.CURLCommand = redactKeys(event.CURLCommand, w.KeysToRedact)
+		event.Matched = redactKeys(event.Matched, w.KeysToRedact)
 	}
 
 	event.Timestamp = time.Now()
@@ -289,12 +311,24 @@ func (w *StandardWriter) Write(event *ResultEvent) error {
 	return nil
 }
 
+func redactKeys(data string, keysToRedact []string) string {
+	for _, key := range keysToRedact {
+		keyPattern := regexp.MustCompile(fmt.Sprintf(`(?i)(%s\s*[:=]\s*["']?)[^"'\r\n&]+(["'\r\n]?)`, regexp.QuoteMeta(key)))
+		data = keyPattern.ReplaceAllString(data, `$1***$2`)
+	}
+	return data
+}
+
 // JSONLogRequest is a trace/error log request written to file
 type JSONLogRequest struct {
-	Template string `json:"template"`
-	Input    string `json:"input"`
-	Error    string `json:"error"`
-	Type     string `json:"type"`
+	Template  string      `json:"template"`
+	Type      string      `json:"type"`
+	Input     string      `json:"input"`
+	Timestamp *time.Time  `json:"timestamp,omitempty"`
+	Address   string      `json:"address"`
+	Error     string      `json:"error"`
+	Kind      string      `json:"kind,omitempty"`
+	Attrs     interface{} `json:"attrs,omitempty"`
 }
 
 // Request writes a log the requests trace log
@@ -307,12 +341,47 @@ func (w *StandardWriter) Request(templatePath, input, requestType string, reques
 		Input:    input,
 		Type:     requestType,
 	}
-	if unwrappedErr := utils.UnwrapError(requestErr); unwrappedErr != nil {
-		request.Error = unwrappedErr.Error()
-	} else {
-		request.Error = "none"
+	if w.timestamp {
+		ts := time.Now()
+		request.Timestamp = &ts
 	}
-
+	parsed, _ := urlutil.ParseAbsoluteURL(input, false)
+	if parsed != nil {
+		request.Address = parsed.Hostname()
+		port := parsed.Port()
+		if port == "" {
+			switch parsed.Scheme {
+			case urlutil.HTTP:
+				port = "80"
+			case urlutil.HTTPS:
+				port = "443"
+			}
+		}
+		request.Address += ":" + port
+	}
+	errX := errkit.FromError(requestErr)
+	if errX == nil {
+		request.Error = "none"
+	} else {
+		request.Kind = errkit.ErrKindUnknown.String()
+		var cause error
+		if len(errX.Errors()) > 1 {
+			cause = errX.Errors()[0]
+		}
+		if cause == nil {
+			cause = errX
+		}
+		cause = tryParseCause(cause)
+		request.Error = cause.Error()
+		request.Kind = errkit.GetErrorKind(requestErr, nucleierr.ErrTemplateLogic).String()
+		if len(errX.Attrs()) > 0 {
+			request.Attrs = slog.GroupValue(errX.Attrs()...)
+		}
+	}
+	// check if address slog attr is avaiable in error if set use it
+	if val := errkit.GetAttrValue(requestErr, "address"); val.Any() != nil {
+		request.Address = val.String()
+	}
 	data, err := jsoniter.Marshal(request)
 	if err != nil {
 		return
@@ -403,7 +472,7 @@ func (w *StandardWriter) WriteFailure(wrappedEvent *InternalWrappedEvent) error 
 	return w.Write(data)
 }
 
-var maxTemplateFileSizeForEncoding = 1024 * 1024
+var maxTemplateFileSizeForEncoding = unitutils.Mega
 
 func (w *StandardWriter) encodeTemplate(templatePath string) string {
 	data, err := os.ReadFile(templatePath)
@@ -443,4 +512,25 @@ func (w *StandardWriter) WriteStoreDebugData(host, templateID, eventType string,
 		f.Close()
 	}
 
+}
+
+// tryParseCause tries to parse the cause of given error
+// this is legacy support due to use of errorutil in existing libraries
+// but this should not be required once all libraries are updated
+func tryParseCause(err error) error {
+	if err == nil {
+		return nil
+	}
+	msg := err.Error()
+	if strings.HasPrefix(msg, "ReadStatusLine:") {
+		// last index is actual error (from rawhttp)
+		parts := strings.Split(msg, ":")
+		return errkit.New("%s", strings.TrimSpace(parts[len(parts)-1]))
+	}
+	if strings.Contains(msg, "read ") {
+		// same here
+		parts := strings.Split(msg, ":")
+		return errkit.New("%s", strings.TrimSpace(parts[len(parts)-1]))
+	}
+	return err
 }

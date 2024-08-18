@@ -141,12 +141,6 @@ func (request *Request) Compile(options *protocols.ExecutorOptions) error {
 		recursion := true
 		request.Recursion = &recursion
 	}
-	dnsClientOptions := &dnsclientpool.Configuration{
-		Retries: request.Retries,
-	}
-	if len(request.Resolvers) > 0 {
-		dnsClientOptions.Resolvers = request.Resolvers
-	}
 	// Create a dns client for the class
 	client, err := request.getDnsClient(options, nil)
 	if err != nil {
@@ -275,6 +269,8 @@ func questionTypeToInt(questionType string) uint16 {
 		question = dns.TypeTLSA
 	case "ANY":
 		question = dns.TypeANY
+	case "SRV":
+		question = dns.TypeSRV
 	}
 	return question
 }

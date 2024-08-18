@@ -3,10 +3,11 @@ package nuclei
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"io"
 
 	"github.com/projectdiscovery/nuclei/v3/pkg/authprovider"
-	"github.com/projectdiscovery/nuclei/v3/pkg/catalog/disk"
+	"github.com/projectdiscovery/nuclei/v3/pkg/catalog"
 	"github.com/projectdiscovery/nuclei/v3/pkg/catalog/loader"
 	"github.com/projectdiscovery/nuclei/v3/pkg/core"
 	"github.com/projectdiscovery/nuclei/v3/pkg/input/provider"
@@ -17,6 +18,7 @@ import (
 	"github.com/projectdiscovery/nuclei/v3/pkg/protocols"
 	"github.com/projectdiscovery/nuclei/v3/pkg/protocols/common/hosterrorscache"
 	"github.com/projectdiscovery/nuclei/v3/pkg/protocols/common/interactsh"
+	"github.com/projectdiscovery/nuclei/v3/pkg/protocols/common/protocolinit"
 	"github.com/projectdiscovery/nuclei/v3/pkg/protocols/headless/engine"
 	"github.com/projectdiscovery/nuclei/v3/pkg/reporting"
 	"github.com/projectdiscovery/nuclei/v3/pkg/templates"
@@ -63,7 +65,7 @@ type NucleiEngine struct {
 
 	// unexported core fields
 	interactshClient *interactsh.Client
-	catalog          *disk.DiskCatalog
+	catalog          catalog.Catalog
 	rateLimiter      *ratelimit.Limiter
 	store            *loader.Store
 	httpxClient      providerTypes.InputLivenessProbe
@@ -181,17 +183,48 @@ func (e *NucleiEngine) SignTemplate(tmplSigner *signer.TemplateSigner, data []by
 	return buff.Bytes(), err
 }
 
-// Close all resources used by nuclei engine
-func (e *NucleiEngine) Close() {
-	e.interactshClient.Close()
-	e.rc.Close()
-	e.customWriter.Close()
-	e.hostErrCache.Close()
-	e.executerOpts.RateLimiter.Stop()
+func (e *NucleiEngine) closeInternal() {
+	if e.interactshClient != nil {
+		e.interactshClient.Close()
+	}
+	if e.rc != nil {
+		e.rc.Close()
+	}
+	if e.customWriter != nil {
+		e.customWriter.Close()
+	}
+	if e.customProgress != nil {
+		e.customProgress.Stop()
+	}
+	if e.hostErrCache != nil {
+		e.hostErrCache.Close()
+	}
+	if e.executerOpts.RateLimiter != nil {
+		e.executerOpts.RateLimiter.Stop()
+	}
+	if e.rateLimiter != nil {
+		e.rateLimiter.Stop()
+	}
+	if e.inputProvider != nil {
+		e.inputProvider.Close()
+	}
+	if e.browserInstance != nil {
+		e.browserInstance.Close()
+	}
+	if e.httpxClient != nil {
+		_ = e.httpxClient.Close()
+	}
 }
 
-// ExecuteWithCallback executes templates on targets and calls callback on each result(only if results are found)
-func (e *NucleiEngine) ExecuteWithCallback(callback ...func(event *output.ResultEvent)) error {
+// Close all resources used by nuclei engine
+func (e *NucleiEngine) Close() {
+	e.closeInternal()
+	protocolinit.Close()
+}
+
+// ExecuteCallbackWithCtx executes templates on targets and calls callback on each result(only if results are found)
+// enable matcher-status option if you expect this callback to be called for all results regardless if it matched or not
+func (e *NucleiEngine) ExecuteCallbackWithCtx(ctx context.Context, callback ...func(event *output.ResultEvent)) error {
 	if !e.templatesLoaded {
 		_ = e.LoadAllTemplates()
 	}
@@ -210,21 +243,34 @@ func (e *NucleiEngine) ExecuteWithCallback(callback ...func(event *output.Result
 	}
 	e.resultCallbacks = append(e.resultCallbacks, filtered...)
 
-	_ = e.engine.ExecuteScanWithOpts(e.store.Templates(), e.inputProvider, false)
+	templatesAndWorkflows := append(e.store.Templates(), e.store.Workflows()...)
+	if len(templatesAndWorkflows) == 0 {
+		return ErrNoTemplatesAvailable
+	}
+
+	_ = e.engine.ExecuteScanWithOpts(ctx, templatesAndWorkflows, e.inputProvider, false)
 	defer e.engine.WorkPool().Wait()
 	return nil
 }
 
+// ExecuteWithCallback is same as ExecuteCallbackWithCtx but with default context
+// Note this is deprecated and will be removed in future major release
+func (e *NucleiEngine) ExecuteWithCallback(callback ...func(event *output.ResultEvent)) error {
+	return e.ExecuteCallbackWithCtx(context.Background(), callback...)
+}
+
+// Options return nuclei Type Options
 func (e *NucleiEngine) Options() *types.Options {
 	return e.opts
 }
 
+// Engine returns core Executer of nuclei
 func (e *NucleiEngine) Engine() *core.Engine {
 	return e.engine
 }
 
-// NewNucleiEngine creates a new nuclei engine instance
-func NewNucleiEngine(options ...NucleiSDKOptions) (*NucleiEngine, error) {
+// NewNucleiEngineCtx creates a new nuclei engine instance with given context
+func NewNucleiEngineCtx(ctx context.Context, options ...NucleiSDKOptions) (*NucleiEngine, error) {
 	// default options
 	e := &NucleiEngine{
 		opts: types.DefaultOptions(),
@@ -235,8 +281,13 @@ func NewNucleiEngine(options ...NucleiSDKOptions) (*NucleiEngine, error) {
 			return nil, err
 		}
 	}
-	if err := e.init(); err != nil {
+	if err := e.init(ctx); err != nil {
 		return nil, err
 	}
 	return e, nil
+}
+
+// Deprecated: use NewNucleiEngineCtx instead
+func NewNucleiEngine(options ...NucleiSDKOptions) (*NucleiEngine, error) {
+	return NewNucleiEngineCtx(context.Background(), options...)
 }

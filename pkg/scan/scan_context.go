@@ -19,7 +19,8 @@ func WithEvents() ScanContextOption {
 }
 
 type ScanContext struct {
-	context.Context
+	ctx context.Context
+
 	// exported / configurable fields
 	Input *contextargs.Context
 
@@ -42,8 +43,13 @@ type ScanContext struct {
 }
 
 // NewScanContext creates a new scan context using input
-func NewScanContext(input *contextargs.Context) *ScanContext {
-	return &ScanContext{Input: input}
+func NewScanContext(ctx context.Context, input *contextargs.Context) *ScanContext {
+	return &ScanContext{ctx: ctx, Input: input}
+}
+
+// Context returns the context of the scan
+func (s *ScanContext) Context() context.Context {
+	return s.ctx
 }
 
 // GenerateResult returns final results slice from all events
@@ -70,6 +76,9 @@ func (s *ScanContext) LogEvent(e *output.InternalWrappedEvent) {
 	if s.withEvents {
 		s.events = append(s.events, e)
 	}
+
+	e.RLock()
+	defer e.RUnlock()
 
 	s.results = append(s.results, e.Results...)
 }

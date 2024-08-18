@@ -15,9 +15,11 @@ import (
 
 	"github.com/projectdiscovery/nuclei/v3/internal/pdcp"
 	"github.com/projectdiscovery/nuclei/v3/pkg/authprovider"
+	"github.com/projectdiscovery/nuclei/v3/pkg/fuzz/frequency"
 	"github.com/projectdiscovery/nuclei/v3/pkg/input/provider"
 	"github.com/projectdiscovery/nuclei/v3/pkg/installer"
 	"github.com/projectdiscovery/nuclei/v3/pkg/loader/parser"
+	"github.com/projectdiscovery/nuclei/v3/pkg/scan/events"
 	uncoverlib "github.com/projectdiscovery/uncover"
 	pdcpauth "github.com/projectdiscovery/utils/auth/pdcp"
 	"github.com/projectdiscovery/utils/env"
@@ -31,6 +33,7 @@ import (
 
 	"github.com/projectdiscovery/gologger"
 	"github.com/projectdiscovery/nuclei/v3/internal/colorizer"
+	"github.com/projectdiscovery/nuclei/v3/internal/httpapi"
 	"github.com/projectdiscovery/nuclei/v3/pkg/catalog"
 	"github.com/projectdiscovery/nuclei/v3/pkg/catalog/config"
 	"github.com/projectdiscovery/nuclei/v3/pkg/catalog/disk"
@@ -51,6 +54,7 @@ import (
 	"github.com/projectdiscovery/nuclei/v3/pkg/protocols/common/uncover"
 	"github.com/projectdiscovery/nuclei/v3/pkg/protocols/common/utils/excludematchers"
 	"github.com/projectdiscovery/nuclei/v3/pkg/protocols/headless/engine"
+	httpProtocol "github.com/projectdiscovery/nuclei/v3/pkg/protocols/http"
 	"github.com/projectdiscovery/nuclei/v3/pkg/protocols/http/httpclientpool"
 	"github.com/projectdiscovery/nuclei/v3/pkg/reporting"
 	"github.com/projectdiscovery/nuclei/v3/pkg/templates"
@@ -71,24 +75,26 @@ var (
 
 // Runner is a client for running the enumeration process.
 type Runner struct {
-	output           output.Writer
-	interactsh       *interactsh.Client
-	options          *types.Options
-	projectFile      *projectfile.ProjectFile
-	catalog          catalog.Catalog
-	progress         progress.Progress
-	colorizer        aurora.Aurora
-	issuesClient     reporting.Client
-	browser          *engine.Browser
-	rateLimiter      *ratelimit.Limiter
-	hostErrors       hosterrorscache.CacheInterface
-	resumeCfg        *types.ResumeCfg
-	pprofServer      *http.Server
-	pdcpUploadErrMsg string
-	inputProvider    provider.InputProvider
+	output             output.Writer
+	interactsh         *interactsh.Client
+	options            *types.Options
+	projectFile        *projectfile.ProjectFile
+	catalog            catalog.Catalog
+	progress           progress.Progress
+	colorizer          aurora.Aurora
+	issuesClient       reporting.Client
+	browser            *engine.Browser
+	rateLimiter        *ratelimit.Limiter
+	hostErrors         hosterrorscache.CacheInterface
+	resumeCfg          *types.ResumeCfg
+	pprofServer        *http.Server
+	pdcpUploadErrMsg   string
+	inputProvider      provider.InputProvider
+	fuzzFrequencyCache *frequency.Tracker
 	//general purpose temporary directory
-	tmpDir string
-	parser parser.Parser
+	tmpDir          string
+	parser          parser.Parser
+	httpApiEndpoint *httpapi.Server
 }
 
 const pprofServerAddress = "127.0.0.1:8086"
@@ -220,6 +226,17 @@ func New(options *types.Options) (*Runner, error) {
 		}()
 	}
 
+	if options.HttpApiEndpoint != "" {
+		apiServer := httpapi.New(options.HttpApiEndpoint, options)
+		gologger.Info().Msgf("Listening api endpoint on: %s", options.HttpApiEndpoint)
+		runner.httpApiEndpoint = apiServer
+		go func() {
+			if err := apiServer.Start(); err != nil {
+				gologger.Error().Msgf("Failed to start API server: %s", err)
+			}
+		}()
+	}
+
 	if (len(options.Templates) == 0 || !options.NewTemplates || (options.TargetsFilePath == "" && !options.Stdin && len(options.Targets) == 0)) && options.UpdateTemplates {
 		os.Exit(0)
 	}
@@ -344,6 +361,10 @@ func (r *Runner) runStandardEnumeration(executerOpts protocols.ExecutorOptions, 
 
 // Close releases all the resources and cleans up
 func (r *Runner) Close() {
+	// dump hosterrors cache
+	if r.hostErrors != nil {
+		r.hostErrors.Close()
+	}
 	if r.output != nil {
 		r.output.Close()
 	}
@@ -399,7 +420,14 @@ func (r *Runner) setupPDCPUpload(writer output.Writer) output.Writer {
 		return writer
 	}
 	if r.options.ScanID != "" {
-		uploadWriter.SetScanID(r.options.ScanID)
+		// ignore and use empty scan id if invalid
+		_ = uploadWriter.SetScanID(r.options.ScanID)
+	}
+	if r.options.ScanName != "" {
+		uploadWriter.SetScanName(r.options.ScanName)
+	}
+	if r.options.TeamID != "" {
+		uploadWriter.SetTeamID(r.options.TeamID)
 	}
 	return output.NewMultiWriter(writer, uploadWriter)
 }
@@ -425,27 +453,31 @@ func (r *Runner) RunEnumeration() error {
 		r.options.ExcludedTemplates = append(r.options.ExcludedTemplates, ignoreFile.Files...)
 	}
 
+	fuzzFreqCache := frequency.New(frequency.DefaultMaxTrackCount, r.options.FuzzParamFrequency)
+	r.fuzzFrequencyCache = fuzzFreqCache
+
 	// Create the executor options which will be used throughout the execution
 	// stage by the nuclei engine modules.
 	executorOpts := protocols.ExecutorOptions{
-		Output:             r.output,
-		Options:            r.options,
-		Progress:           r.progress,
-		Catalog:            r.catalog,
-		IssuesClient:       r.issuesClient,
-		RateLimiter:        r.rateLimiter,
-		Interactsh:         r.interactsh,
-		ProjectFile:        r.projectFile,
-		Browser:            r.browser,
-		Colorizer:          r.colorizer,
-		ResumeCfg:          r.resumeCfg,
-		ExcludeMatchers:    excludematchers.New(r.options.ExcludeMatchers),
-		InputHelper:        input.NewHelper(),
-		TemporaryDirectory: r.tmpDir,
-		Parser:             r.parser,
+		Output:              r.output,
+		Options:             r.options,
+		Progress:            r.progress,
+		Catalog:             r.catalog,
+		IssuesClient:        r.issuesClient,
+		RateLimiter:         r.rateLimiter,
+		Interactsh:          r.interactsh,
+		ProjectFile:         r.projectFile,
+		Browser:             r.browser,
+		Colorizer:           r.colorizer,
+		ResumeCfg:           r.resumeCfg,
+		ExcludeMatchers:     excludematchers.New(r.options.ExcludeMatchers),
+		InputHelper:         input.NewHelper(),
+		TemporaryDirectory:  r.tmpDir,
+		Parser:              r.parser,
+		FuzzParamsFrequency: fuzzFreqCache,
 	}
 
-	if env.GetEnvOrDefault("NUCLEI_ARGS", "") == "req_url_pattern=true" {
+	if config.DefaultConfig.IsDebugArgEnabled(config.DebugExportURLPattern) {
 		// Go StdLib style experimental/debug feature switch
 		executorOpts.ExportReqURLPattern = true
 	}
@@ -495,6 +527,23 @@ func (r *Runner) RunEnumeration() error {
 		return errors.Wrap(err, "Could not create loader.")
 	}
 
+	// list all templates or tags as specified by user.
+	// This uses a separate parser to reduce time taken as
+	// normally nuclei does a lot of compilation and stuff
+	// for templates, which we don't want for these simp
+	if r.options.TemplateList || r.options.TemplateDisplay || r.options.TagList {
+		if err := store.LoadTemplatesOnlyMetadata(); err != nil {
+			return err
+		}
+
+		if r.options.TagList {
+			r.listAvailableStoreTags(store)
+		} else {
+			r.listAvailableStoreTemplates(store)
+		}
+		os.Exit(0)
+	}
+
 	if r.options.Validate {
 		if err := store.ValidateTemplates(); err != nil {
 			return err
@@ -525,12 +574,6 @@ func (r *Runner) RunEnumeration() error {
 			_ = r.inputProvider.SetWithExclusions(host)
 		}
 	}
-	// list all templates
-	if r.options.TemplateList || r.options.TemplateDisplay {
-		r.listAvailableStoreTemplates(store)
-		os.Exit(0)
-	}
-
 	// display execution info like version , templates used etc
 	r.displayExecutionInfo(store)
 
@@ -553,6 +596,20 @@ func (r *Runner) RunEnumeration() error {
 		executorOpts.InputHelper.InputsHTTP = inputHelpers
 	}
 
+	// initialize stats worker ( this is no-op unless nuclei is built with stats build tag)
+	// during execution a directory with 2 files will be created in the current directory
+	// config.json - containing below info
+	// events.jsonl - containing all start and end times of all templates
+	events.InitWithConfig(&events.ScanConfig{
+		Name:                "nuclei-stats", // make this configurable
+		TargetCount:         int(r.inputProvider.Count()),
+		TemplatesCount:      len(store.Templates()) + len(store.Workflows()),
+		TemplateConcurrency: r.options.TemplateThreads,
+		PayloadConcurrency:  r.options.PayloadConcurrency,
+		JsConcurrency:       r.options.JsConcurrency,
+		Retries:             r.options.Retries,
+	}, "")
+
 	enumeration := false
 	var results *atomic.Bool
 	results, err = r.runStandardEnumeration(executorOpts, store, executorEngine)
@@ -571,6 +628,7 @@ func (r *Runner) RunEnumeration() error {
 	if executorOpts.InputHelper != nil {
 		_ = executorOpts.InputHelper.Close()
 	}
+	r.fuzzFrequencyCache.Close()
 
 	// todo: error propagation without canonical straight error check is required by cloud?
 	// use safe dereferencing to avoid potential panics in case of previous unchecked errors
@@ -640,7 +698,7 @@ func (r *Runner) executeTemplatesInput(store *loader.Store, engine *core.Engine)
 	if r.inputProvider == nil {
 		return nil, errors.New("no input provider found")
 	}
-	results := engine.ExecuteScanWithOpts(finalTemplates, r.inputProvider, r.options.DisableClustering)
+	results := engine.ExecuteScanWithOpts(context.Background(), finalTemplates, r.inputProvider, r.options.DisableClustering)
 	return results, nil
 }
 
@@ -669,6 +727,7 @@ func (r *Runner) displayExecutionInfo(store *loader.Store) {
 	} else {
 		stats.DisplayAsWarning(templates.SkippedCodeTmplTamperedStats)
 	}
+	stats.DisplayAsWarning(httpProtocol.SetThreadToCountZero)
 	stats.ForceDisplayWarning(templates.SkippedUnsignedStats)
 	stats.ForceDisplayWarning(templates.SkippedRequestSignatureStats)
 

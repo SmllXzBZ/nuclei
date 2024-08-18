@@ -90,9 +90,9 @@ func (g *generatedRequest) ApplyAuth(provider authprovider.AuthProvider) {
 		return
 	}
 	if g.request != nil {
-		auth := provider.LookupURLX(g.request.URL)
-		if auth != nil {
-			auth.ApplyOnRR(g.request)
+		authStrategies := provider.LookupURLX(g.request.URL)
+		for _, strategy := range authStrategies {
+			strategy.ApplyOnRR(g.request)
 		}
 	}
 	if g.rawRequest != nil {
@@ -101,11 +101,11 @@ func (g *generatedRequest) ApplyAuth(provider authprovider.AuthProvider) {
 			gologger.Warning().Msgf("[authprovider] Could not parse URL %s: %s\n", g.rawRequest.FullURL, err)
 			return
 		}
-		auth := provider.LookupURLX(parsed)
-		if auth != nil {
-			// here we need to apply it custom because we don't have a standard/official
-			// rawhttp request format ( which we probably should have )
-			g.rawRequest.ApplyAuthStrategy(auth)
+		authStrategies := provider.LookupURLX(parsed)
+		// here we need to apply it custom because we don't have a standard/official
+		// rawhttp request format ( which we probably should have )
+		for _, strategy := range authStrategies {
+			g.rawRequest.ApplyAuthStrategy(strategy)
 		}
 	}
 }
@@ -277,7 +277,7 @@ func (r *requestGenerator) makeSelfContainedRequest(ctx context.Context, data st
 			return nil, fmt.Errorf("malformed request supplied")
 		}
 
-		if err := expressions.ContainsUnresolvedVariables(parts[1]); err != nil {
+		if err := expressions.ContainsUnresolvedVariables(parts[1]); err != nil && !r.request.SkipVariablesCheck {
 			return nil, ErrUnresolvedVars.Msgf(parts[1])
 		}
 
@@ -296,7 +296,7 @@ func (r *requestGenerator) makeSelfContainedRequest(ctx context.Context, data st
 		}
 		return r.generateRawRequest(ctx, data, parsed, values, payloads)
 	}
-	if err := expressions.ContainsUnresolvedVariables(data); err != nil {
+	if err := expressions.ContainsUnresolvedVariables(data); err != nil && !r.request.SkipVariablesCheck {
 		// early exit: if there are any unresolved variables in `path` after evaluation
 		// then return early since this will definitely fail
 		return nil, ErrUnresolvedVars.Msgf(data)

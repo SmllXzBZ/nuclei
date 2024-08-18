@@ -44,7 +44,7 @@ func (request *Request) ExecuteWithResults(input *contextargs.Context, metadata,
 		if err != nil {
 			return err
 		}
-		input = contextargs.NewWithInput(url)
+		input = contextargs.NewWithInput(input.Context(), url)
 	}
 
 	if request.options.Browser.UserAgent() == "" {
@@ -174,7 +174,7 @@ func (request *Request) executeRequestWithPayloads(input *contextargs.Context, p
 				reqBuilder.WriteString("\t" + actStepStr + "\n")
 			}
 		}
-		gologger.Debug().Msgf(reqBuilder.String())
+		gologger.Debug().Msg(reqBuilder.String())
 	}
 
 	var responseBody string
@@ -215,6 +215,10 @@ func (request *Request) executeRequestWithPayloads(input *contextargs.Context, p
 	}
 
 	dumpResponse(event, request.options, responseBody, input.MetaInput.Input)
+	shouldStopAtFirstMatch := request.StopAtFirstMatch || request.options.StopAtFirstMatch || request.options.Options.StopAtFirstMatch
+	if shouldStopAtFirstMatch && event.HasOperatorResult() {
+		return types.ErrNoMoreRequests
+	}
 	return nil
 }
 

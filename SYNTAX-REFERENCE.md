@@ -1404,6 +1404,19 @@ Valid values:
 
 <div class="dd">
 
+<code>skip-secret-file</code>  <i>bool</i>
+
+</div>
+<div class="dt">
+
+SkipSecretFile skips the authentication or authorization configured in the secret file.
+
+</div>
+
+<hr />
+
+<div class="dd">
+
 <code>cookie-reuse</code>  <i>bool</i>
 
 </div>
@@ -1800,13 +1813,50 @@ Valid values:
 
 Part is the part of request to fuzz.
 
-query fuzzes the query part of url. More parts will be added later.
+
+Valid values:
+
+
+  - <code>query</code>
+
+  - <code>header</code>
+
+  - <code>path</code>
+
+  - <code>body</code>
+
+  - <code>cookie</code>
+
+  - <code>request</code>
+</div>
+
+<hr />
+
+<div class="dd">
+
+<code>parts</code>  <i>[]string</i>
+
+</div>
+<div class="dt">
+
+Parts is the list of parts to fuzz. If multiple parts need to be
+defined while excluding some, this should be used instead of singular part.
 
 
 Valid values:
 
 
   - <code>query</code>
+
+  - <code>header</code>
+
+  - <code>path</code>
+
+  - <code>body</code>
+
+  - <code>cookie</code>
+
+  - <code>request</code>
 </div>
 
 <hr />
@@ -2750,6 +2800,8 @@ Enum Values:
   - <code>TLSA</code>
 
   - <code>ANY</code>
+
+  - <code>SRV</code>
 </div>
 
 <hr />
@@ -4293,19 +4345,6 @@ Args contains the arguments to pass to the javascript code.
 <div class="dt">
 
 Code contains code to execute for the javascript request.
-
-</div>
-
-<hr />
-
-<div class="dd">
-
-<code>timeout</code>  <i>int</i>
-
-</div>
-<div class="dt">
-
-Timeout in seconds is optional timeout for each  javascript script execution (i.e init, pre-condition, code)
 
 </div>
 

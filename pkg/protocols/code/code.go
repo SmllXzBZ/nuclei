@@ -32,16 +32,19 @@ import (
 	templateTypes "github.com/projectdiscovery/nuclei/v3/pkg/templates/types"
 	"github.com/projectdiscovery/nuclei/v3/pkg/types"
 	contextutil "github.com/projectdiscovery/utils/context"
+	"github.com/projectdiscovery/utils/errkit"
 	errorutil "github.com/projectdiscovery/utils/errors"
 )
 
 const (
-	pythonEnvRegex    = `os\.getenv\(['"]([^'"]+)['"]\)`
-	TimeoutMultiplier = 6 // timeout multiplier for code protocol
+	pythonEnvRegex = `os\.getenv\(['"]([^'"]+)['"]\)`
 )
 
 var (
+	// pythonEnvRegexCompiled is the compiled regex for python environment variables
 	pythonEnvRegexCompiled = regexp.MustCompile(pythonEnvRegex)
+	// ErrCodeExecutionDeadline is the error returned when alloted time for script execution exceeds
+	ErrCodeExecutionDeadline = errkit.New("code execution deadline exceeded").SetKind(errkit.ErrKindDeadline).Build()
 )
 
 // Request is a request for the SSL protocol
@@ -160,6 +163,8 @@ func (request *Request) ExecuteWithResults(input *contextargs.Context, dynamicVa
 	if request.options.HasTemplateCtx(input.MetaInput) {
 		allvars = generators.MergeMaps(allvars, request.options.GetTemplateCtx(input.MetaInput).GetAll())
 	}
+	// add dynamic and previous variables
+	allvars = generators.MergeMaps(allvars, dynamicValues, previous)
 	// optionvars are vars passed from CLI or env variables
 	optionVars := generators.BuildPayloadFromOptions(request.options.Options)
 	variablesMap := request.options.Variables.Evaluate(allvars)
@@ -172,9 +177,6 @@ func (request *Request) ExecuteWithResults(input *contextargs.Context, dynamicVa
 		allvars[name] = v
 		metaSrc.AddVariable(gozerotypes.Variable{Name: name, Value: v})
 	}
-
-	// set timeout using multiplier
-	timeout := TimeoutMultiplier * request.options.Options.Timeout
 
 	if request.PreCondition != "" {
 		if request.options.Options.Debug || request.options.Options.DebugRequests {
@@ -193,10 +195,11 @@ func (request *Request) ExecuteWithResults(input *contextargs.Context, dynamicVa
 
 		result, err := request.options.JsCompiler.ExecuteWithOptions(request.preConditionCompiled, args,
 			&compiler.ExecuteOptions{
-				Timeout:  timeout,
-				Source:   &request.PreCondition,
-				Callback: registerPreConditionFunctions,
-				Cleanup:  cleanUpPreConditionFunctions,
+				TimeoutVariants: request.options.Options.GetTimeouts(),
+				Source:          &request.PreCondition,
+				Callback:        registerPreConditionFunctions,
+				Cleanup:         cleanUpPreConditionFunctions,
+				Context:         input.Context(),
 			})
 		if err != nil {
 			return errorutil.NewWithTag(request.TemplateID, "could not execute pre-condition: %s", err)
@@ -211,7 +214,7 @@ func (request *Request) ExecuteWithResults(input *contextargs.Context, dynamicVa
 		}
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeout)*time.Second)
+	ctx, cancel := context.WithTimeoutCause(input.Context(), request.options.Options.GetTimeouts().CodeExecutionTimeout, ErrCodeExecutionDeadline)
 	defer cancel()
 	// Note: we use contextutil despite the fact that gozero accepts context as argument
 	gOutput, err := contextutil.ExecFuncWithTwoReturns(ctx, func() (*gozerotypes.Result, error) {

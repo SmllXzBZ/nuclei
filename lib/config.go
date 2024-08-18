@@ -10,6 +10,7 @@ import (
 	"github.com/projectdiscovery/ratelimit"
 
 	"github.com/projectdiscovery/nuclei/v3/pkg/authprovider"
+	"github.com/projectdiscovery/nuclei/v3/pkg/catalog"
 	"github.com/projectdiscovery/nuclei/v3/pkg/model/types/severity"
 	"github.com/projectdiscovery/nuclei/v3/pkg/output"
 	"github.com/projectdiscovery/nuclei/v3/pkg/progress"
@@ -163,11 +164,17 @@ func WithConcurrency(opts Concurrency) NucleiSDKOptions {
 }
 
 // WithGlobalRateLimit sets global rate (i.e all hosts combined) limit options
+// Deprecated: will be removed in favour of WithGlobalRateLimitCtx in next release
 func WithGlobalRateLimit(maxTokens int, duration time.Duration) NucleiSDKOptions {
+	return WithGlobalRateLimitCtx(context.Background(), maxTokens, duration)
+}
+
+// WithGlobalRateLimitCtx allows setting a global rate limit for the entire engine
+func WithGlobalRateLimitCtx(ctx context.Context, maxTokens int, duration time.Duration) NucleiSDKOptions {
 	return func(e *NucleiEngine) error {
 		e.opts.RateLimit = maxTokens
 		e.opts.RateLimitDuration = duration
-		e.rateLimiter = ratelimit.New(context.Background(), uint(e.opts.RateLimit), e.opts.RateLimitDuration)
+		e.rateLimiter = ratelimit.New(ctx, uint(e.opts.RateLimit), e.opts.RateLimitDuration)
 		return nil
 	}
 }
@@ -314,7 +321,7 @@ func WithScanStrategy(strategy string) NucleiSDKOptions {
 // OutputWriter
 type OutputWriter output.Writer
 
-// UseWriter allows setting custom output writer
+// UseOutputWriter allows setting custom output writer
 // by default a mock writer is used with user defined callback
 // if outputWriter is used callback will be ignored
 func UseOutputWriter(writer OutputWriter) NucleiSDKOptions {
@@ -389,11 +396,12 @@ func WithHeaders(headers []string) NucleiSDKOptions {
 func EnablePassiveMode() NucleiSDKOptions {
 	return func(e *NucleiEngine) error {
 		e.opts.OfflineHTTP = true
+		e.opts.DisableHTTPProbe = true
 		return nil
 	}
 }
 
-// WithAuthOptions allows setting a custom authprovider implementation
+// WithAuthProvider allows setting a custom authprovider implementation
 func WithAuthProvider(provider authprovider.AuthProvider) NucleiSDKOptions {
 	return func(e *NucleiEngine) error {
 		e.authprovider = provider
@@ -422,6 +430,22 @@ func DASTMode() NucleiSDKOptions {
 func SignedTemplatesOnly() NucleiSDKOptions {
 	return func(e *NucleiEngine) error {
 		e.opts.DisableUnsignedTemplates = true
+		return nil
+	}
+}
+
+// WithCatalog uses a supplied catalog
+func WithCatalog(cat catalog.Catalog) NucleiSDKOptions {
+	return func(e *NucleiEngine) error {
+		e.catalog = cat
+		return nil
+	}
+}
+
+// DisableUpdateCheck disables nuclei update check
+func DisableUpdateCheck() NucleiSDKOptions {
+	return func(e *NucleiEngine) error {
+		DefaultConfig.DisableUpdateCheck()
 		return nil
 	}
 }

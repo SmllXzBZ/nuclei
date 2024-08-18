@@ -13,6 +13,7 @@ import (
 	"github.com/projectdiscovery/nuclei/v3/pkg/protocols/common/protocolstate"
 	"github.com/projectdiscovery/nuclei/v3/pkg/types"
 	"github.com/projectdiscovery/nuclei/v3/pkg/utils/expand"
+	"github.com/projectdiscovery/utils/auth/pdcp"
 	"github.com/stretchr/testify/require"
 )
 
@@ -39,7 +40,7 @@ func Test_expandCIDR(t *testing.T) {
 		// scan
 		got := []string{}
 		input.hostMap.Scan(func(k, _ []byte) error {
-			var metainput contextargs.MetaInput
+			metainput := contextargs.NewMetaInput()
 			if err := metainput.Unmarshal(string(k)); err != nil {
 				return err
 			}
@@ -68,7 +69,7 @@ func (m *mockDnsHandler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 		msg.Authoritative = true
 		domain := msg.Question[0].Name
 		msg.Answer = append(msg.Answer, &dns.AAAA{
-			Hdr:  dns.RR_Header{Name: domain, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60},
+			Hdr:  dns.RR_Header{Name: domain, Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: 60},
 			AAAA: net.ParseIP("2400:6180:0:d0::91:1001"),
 		})
 	}
@@ -140,7 +141,7 @@ func Test_scanallips_normalizeStoreInputValue(t *testing.T) {
 		// scan
 		got := []string{}
 		input.hostMap.Scan(func(k, v []byte) error {
-			var metainput contextargs.MetaInput
+			metainput := contextargs.NewMetaInput()
 			if err := metainput.Unmarshal(string(k)); err != nil {
 				return err
 			}
@@ -153,6 +154,13 @@ func Test_scanallips_normalizeStoreInputValue(t *testing.T) {
 }
 
 func Test_expandASNInputValue(t *testing.T) {
+	// skip this test if pdcp keys are not present
+	h := pdcp.PDCPCredHandler{}
+	creds, err := h.GetCreds()
+	if err != nil || creds == nil || creds.APIKey == "" {
+		t.Logf("Skipping asnmap test as pdcp keys are not present")
+		t.SkipNow()
+	}
 	tests := []struct {
 		asn                string
 		expectedOutputFile string
@@ -176,7 +184,7 @@ func Test_expandASNInputValue(t *testing.T) {
 		// scan the hmap
 		got := []string{}
 		input.hostMap.Scan(func(k, v []byte) error {
-			var metainput contextargs.MetaInput
+			metainput := contextargs.NewMetaInput()
 			if err := metainput.Unmarshal(string(k)); err != nil {
 				return err
 			}

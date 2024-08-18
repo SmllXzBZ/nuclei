@@ -9,7 +9,6 @@ import (
 	json "github.com/json-iterator/go"
 	"github.com/pkg/errors"
 
-	"github.com/projectdiscovery/gologger"
 	"github.com/projectdiscovery/nuclei/v3/pkg/fuzz"
 	"github.com/projectdiscovery/nuclei/v3/pkg/operators"
 	"github.com/projectdiscovery/nuclei/v3/pkg/operators/matchers"
@@ -19,6 +18,7 @@ import (
 	"github.com/projectdiscovery/nuclei/v3/pkg/protocols/common/protocolstate"
 	"github.com/projectdiscovery/nuclei/v3/pkg/protocols/http/httpclientpool"
 	httputil "github.com/projectdiscovery/nuclei/v3/pkg/protocols/utils/http"
+	"github.com/projectdiscovery/nuclei/v3/pkg/utils/stats"
 	"github.com/projectdiscovery/rawhttp"
 	"github.com/projectdiscovery/retryablehttp-go"
 	fileutil "github.com/projectdiscovery/utils/file"
@@ -146,6 +146,10 @@ type Request struct {
 	// values:
 	//   - "AWS"
 	Signature SignatureTypeHolder `yaml:"signature,omitempty" json:"signature,omitempty" jsonschema:"title=signature is the http request signature method,description=Signature is the HTTP Request signature Method,enum=AWS"`
+
+	// description: |
+	//   SkipSecretFile skips the authentication or authorization configured in the secret file.
+	SkipSecretFile bool `yaml:"skip-secret-file,omitempty" json:"skip-secret-file,omitempty" jsonschema:"title=bypass secret file,description=Skips the authentication or authorization configured in the secret file"`
 
 	// description: |
 	//   CookieReuse is an optional setting that enables cookie reuse for
@@ -336,7 +340,7 @@ func (request *Request) Compile(options *protocols.ExecutorOptions) error {
 				request.Raw[i] = strings.ReplaceAll(raw, "\n", "\r\n")
 			}
 		}
-		request.rawhttpClient = httpclientpool.GetRawHTTP(options.Options)
+		request.rawhttpClient = httpclientpool.GetRawHTTP(options)
 	}
 	if len(request.Matchers) > 0 || len(request.Extractors) > 0 {
 		compiled := &request.Operators
@@ -455,7 +459,7 @@ func (request *Request) Compile(options *protocols.ExecutorOptions) error {
 			}
 		}
 		if hasNamedInternalExtractor && hasMultipleRequests {
-			gologger.Warning().Label(options.TemplateID).Msgf("Setting thread count to 0 because dynamic extractors are not supported with payloads yet")
+			stats.Increment(SetThreadToCountZero)
 			request.Threads = 0
 		} else {
 			// specifically for http requests high concurrency and and threads will lead to memory exausthion, hence reduce the maximum parallelism
@@ -489,4 +493,12 @@ func (request *Request) Requests() int {
 		return requests
 	}
 	return len(request.Path)
+}
+
+const (
+	SetThreadToCountZero = "set-thread-count-to-zero"
+)
+
+func init() {
+	stats.NewEntry(SetThreadToCountZero, "Setting thread count to 0 for %d templates, dynamic extractors are not supported with payloads yet")
 }

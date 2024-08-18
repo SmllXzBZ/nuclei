@@ -11,9 +11,18 @@ ifneq ($(shell go env GOOS),darwin)
 LDFLAGS := -extldflags "-static"
 endif
     
+.PHONY: all build build-stats scan-charts docs test integration functional tidy verify devtools jsupdate ts fuzzplayground memogen dsl-docs
+
 all: build
 build:
+	rm -f nuclei 2>/dev/null
 	$(GOBUILD) $(GOFLAGS) -ldflags '$(LDFLAGS)' -o "nuclei" cmd/nuclei/main.go
+build-stats:
+	rm -f nuclei-stats 2>/dev/null
+	$(GOBUILD) $(GOFLAGS) -ldflags '$(LDFLAGS)' -tags=stats -o "nuclei-stats" cmd/nuclei/main.go
+scan-charts:
+	rm -f scan-charts 2>/dev/null
+	$(GOBUILD) $(GOFLAGS) -ldflags '$(LDFLAGS)' -o "scan-charts" cmd/scan-charts/main.go
 docs:
 	if ! which dstdocgen > /dev/null; then
 		echo -e "Command not found! Install? (y/n) \c"
@@ -30,6 +39,8 @@ functional:
 	cd cmd/functional-test; bash run.sh
 tidy:
 	$(GOMOD) tidy
+verify: tidy
+	$(GOMOD) verify
 devtools:
 	$(GOBUILD) $(GOFLAGS) -ldflags '$(LDFLAGS)' -o "bindgen" pkg/js/devtools/bindgen/cmd/bindgen/main.go
 	$(GOBUILD) $(GOFLAGS) -ldflags '$(LDFLAGS)' -o "tsgen" pkg/js/devtools/tsgen/cmd/tsgen/main.go

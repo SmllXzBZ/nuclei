@@ -1,6 +1,7 @@
 package fuzz
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"regexp"
@@ -15,6 +16,8 @@ import (
 	"github.com/projectdiscovery/nuclei/v3/pkg/protocols/common/generators"
 	"github.com/projectdiscovery/retryablehttp-go"
 	errorutil "github.com/projectdiscovery/utils/errors"
+	mapsutil "github.com/projectdiscovery/utils/maps"
+	sliceutil "github.com/projectdiscovery/utils/slice"
 	urlutil "github.com/projectdiscovery/utils/url"
 )
 
@@ -45,6 +48,8 @@ type ExecuteRuleInput struct {
 	Values map[string]interface{}
 	// BaseRequest is the base http request for fuzzing rule
 	BaseRequest *retryablehttp.Request
+	// DisplayFuzzPoints is a flag to display fuzz points
+	DisplayFuzzPoints bool
 }
 
 // GeneratedRequest is a single generated request for rule
@@ -57,6 +62,8 @@ type GeneratedRequest struct {
 	DynamicValues map[string]interface{}
 	// Component is the component for the request
 	Component component.Component
+	// Parameter being fuzzed
+	Parameter string
 }
 
 // Execute executes a fuzzing rule accepting a callback on which
@@ -74,8 +81,9 @@ func (rule *Rule) Execute(input *ExecuteRuleInput) (err error) {
 
 	var finalComponentList []component.Component
 	// match rule part with component name
+	displayDebugFuzzPoints := make(map[string]map[string]string)
 	for _, componentName := range component.Components {
-		if rule.partType != requestPartType && rule.Part != componentName {
+		if !(rule.Part == componentName || sliceutil.Contains(rule.Parts, componentName) || rule.partType == requestPartType) {
 			continue
 		}
 		component := component.New(componentName)
@@ -87,11 +95,24 @@ func (rule *Rule) Execute(input *ExecuteRuleInput) (err error) {
 		if !discovered {
 			continue
 		}
+
 		// check rule applicable on this component
 		if !rule.checkRuleApplicableOnComponent(component) {
 			continue
 		}
+		// Debugging display for fuzz points
+		if input.DisplayFuzzPoints {
+			displayDebugFuzzPoints[componentName] = make(map[string]string)
+			_ = component.Iterate(func(key string, value interface{}) error {
+				displayDebugFuzzPoints[componentName][key] = fmt.Sprintf("%v", value)
+				return nil
+			})
+		}
 		finalComponentList = append(finalComponentList, component)
+	}
+	if len(displayDebugFuzzPoints) > 0 {
+		marshalled, _ := json.MarshalIndent(displayDebugFuzzPoints, "", "  ")
+		gologger.Info().Msgf("[%s] Fuzz points for %s [%s]\n%s\n", rule.options.TemplateID, input.Input.MetaInput.Input, input.BaseRequest.Method, string(marshalled))
 	}
 
 	if len(finalComponentList) == 0 {
@@ -145,14 +166,27 @@ mainLoop:
 func (rule *Rule) evaluateVarsWithInteractsh(data map[string]interface{}, interactshUrls []string) (map[string]interface{}, []string) {
 	// Check if Interactsh options are configured
 	if rule.options.Interactsh != nil {
+		interactshUrlsMap := make(map[string]struct{})
+		for _, url := range interactshUrls {
+			interactshUrlsMap[url] = struct{}{}
+		}
+		interactshUrls = mapsutil.GetKeys(interactshUrlsMap)
 		// Iterate through the data to replace and evaluate variables with Interactsh URLs
 		for k, v := range data {
+			value := fmt.Sprint(v)
 			// Replace variables with Interactsh URLs and collect new URLs
-			got, oastUrls := rule.options.Interactsh.Replace(fmt.Sprint(v), interactshUrls)
-
+			got, oastUrls := rule.options.Interactsh.Replace(value, interactshUrls)
+			if got != value {
+				data[k] = got
+			}
 			// Append new OAST URLs if any
 			if len(oastUrls) > 0 {
-				interactshUrls = append(interactshUrls, oastUrls...)
+				for _, url := range oastUrls {
+					if _, ok := interactshUrlsMap[url]; !ok {
+						interactshUrlsMap[url] = struct{}{}
+						interactshUrls = append(interactshUrls, url)
+					}
+				}
 			}
 			// Evaluate the replaced data
 			evaluatedData, err := expressions.Evaluate(got, data)
@@ -211,11 +245,19 @@ func (rule *Rule) executeRuleValues(input *ExecuteRuleInput, ruleComponent compo
 		})
 		// if mode is multiple now build and execute it
 		if rule.modeType == multipleModeType {
+			rule.Fuzz.KV.Iterate(func(key, value string) bool {
+				var evaluated string
+				evaluated, input.InteractURLs = rule.executeEvaluate(input, key, "", value, input.InteractURLs)
+				if err := ruleComponent.SetValue(key, evaluated); err != nil {
+					return true
+				}
+				return true
+			})
 			req, err := ruleComponent.Rebuild()
 			if err != nil {
 				return err
 			}
-			if gotErr := rule.execWithInput(input, req, input.InteractURLs, ruleComponent); gotErr != nil {
+			if gotErr := rule.execWithInput(input, req, input.InteractURLs, ruleComponent, "", ""); gotErr != nil {
 				return gotErr
 			}
 		}
@@ -251,8 +293,9 @@ func (rule *Rule) Compile(generator *generators.PayloadGenerator, options *proto
 		} else {
 			rule.partType = valueType
 		}
-	} else {
-		rule.partType = queryPartType
+	}
+	if rule.Part == "" && len(rule.Parts) == 0 {
+		return errors.Errorf("no part specified for rule")
 	}
 
 	if rule.Type != "" {

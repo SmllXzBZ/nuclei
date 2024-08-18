@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	"github.com/projectdiscovery/retryablehttp-go"
+	"github.com/projectdiscovery/useragent"
 	"github.com/projectdiscovery/utils/conversion"
 	mapsutil "github.com/projectdiscovery/utils/maps"
 	urlutil "github.com/projectdiscovery/utils/url"
@@ -73,6 +74,10 @@ func (rr *RequestResponse) BuildRequest() (*retryablehttp.Request, error) {
 			req.Header.Add(k, v)
 			return true
 		})
+		if req.Header.Get("User-Agent") == "" {
+			userAgent := useragent.PickRandom()
+			req.Header.Set("User-Agent", userAgent.Raw)
+		}
 		rr.req = req
 	})
 	return rr.req, rr.reqErr
@@ -118,11 +123,15 @@ func (rr *RequestResponse) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &m); err != nil {
 		return err
 	}
-	urlStr, ok := m["url"]
+	urlStrRaw, ok := m["url"]
 	if !ok {
 		return fmt.Errorf("missing url in request response")
 	}
-	parsed, err := urlutil.ParseAbsoluteURL(string(urlStr), false)
+	var urlStr string
+	if err := json.Unmarshal(urlStrRaw, &urlStr); err != nil {
+		return err
+	}
+	parsed, err := urlutil.ParseAbsoluteURL(urlStr, false)
 	if err != nil {
 		return err
 	}
