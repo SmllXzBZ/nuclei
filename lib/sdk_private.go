@@ -7,6 +7,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/projectdiscovery/nuclei/v3/pkg/input"
+
 	"github.com/logrusorgru/aurora"
 	"github.com/pkg/errors"
 	"github.com/projectdiscovery/gologger"
@@ -108,14 +110,6 @@ func (e *NucleiEngine) init(ctx context.Context) error {
 		return err
 	}
 
-	if e.opts.ProxyInternal && types.ProxyURL != "" || types.ProxySocksURL != "" {
-		httpclient, err := httpclientpool.Get(e.opts, &httpclientpool.Configuration{})
-		if err != nil {
-			return err
-		}
-		e.httpClient = httpclient
-	}
-
 	e.parser = templates.NewParser()
 
 	if sharedInit == nil || protocolstate.ShouldInit() {
@@ -125,6 +119,14 @@ func (e *NucleiEngine) init(ctx context.Context) error {
 	sharedInit.Do(func() {
 		_ = protocolinit.Init(e.opts)
 	})
+
+	if e.opts.ProxyInternal && types.ProxyURL != "" || types.ProxySocksURL != "" {
+		httpclient, err := httpclientpool.Get(e.opts, &httpclientpool.Configuration{})
+		if err != nil {
+			return err
+		}
+		e.httpClient = httpclient
+	}
 
 	e.applyRequiredDefaults(ctx)
 	var err error
@@ -171,6 +173,7 @@ func (e *NucleiEngine) init(ctx context.Context) error {
 		ResumeCfg:       types.NewResumeCfg(),
 		Browser:         e.browserInstance,
 		Parser:          e.parser,
+		InputHelper:     input.NewHelper(),
 	}
 	if len(e.opts.SecretsFile) > 0 {
 		authTmplStore, err := runner.GetAuthTmplStore(*e.opts, e.catalog, e.executerOpts)
